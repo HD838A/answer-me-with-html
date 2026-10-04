@@ -4459,8 +4459,70 @@ var ZH_CLICHES = Object.freeze([
   "\u4E00\u7AD9\u5F0F",
   "\u5E95\u5C42\u903B\u8F91",
   "\u9897\u7C92\u5EA6",
-  "\u65B9\u6CD5\u8BBA"
+  "\u65B9\u6CD5\u8BBA",
+  "\u62C9\u901A",
+  "\u6C89\u6DC0",
+  "\u515C\u5E95",
+  "\u6536\u53E3",
+  "\u900F\u4F20",
+  "\u8D5B\u9053",
+  "\u5FC3\u667A"
 ]);
+var UNIT = String.raw`(?:个|次|秒|天|分钟|小时|倍|字|条|项|人|行|位|%|MB|GB|KB|TB|ms)?`;
+var ZH_WORDS = Object.freeze([
+  // 没有数值的量和程度
+  { re: /尽快/g, suggestion: "\u5199\u51FA\u5177\u4F53\u65F6\u9650" },
+  { re: /及时(?!性)/g, suggestion: "\u5199\u51FA\u5177\u4F53\u65F6\u9650\uFF0C\u6216\u5220\u9664" },
+  { re: /大概|大约/g, suggestion: "\u63CF\u8FF0\u53E5\u7528\u300C\u7EA6\u300D\uFF0C\u6B65\u9AA4\u5199\u6570\u503C" },
+  { re: /(?<=[\d个次秒天钟时元倍%])\s*左右/g, suggestion: "\u5199\u6570\u503C\u6216\u8303\u56F4" },
+  { re: /若干/g, suggestion: "\u5199\u6570\u5B57" },
+  { re: /多次/g, suggestion: "\u5199\u6B21\u6570" },
+  { re: /基本上/g, suggestion: "\u5220\u9664\uFF0C\u6216\u5199\u51FA\u4F8B\u5916" },
+  { re: /非常|极其|十分(?!钟)/g, suggestion: "\u5220\u9664\uFF0C\u6216\u7ED9\u51FA\u6570\u503C" },
+  { re: new RegExp(String.raw`(?<=\d\s*${UNIT}\s*)(?:以上|以下)`, "g"), suggestion: "\u5199\u660E\u7AEF\u70B9\uFF1A\u5927\u4E8E / \u4E0D\u5C0F\u4E8E\uFF0C\u5C0F\u4E8E / \u4E0D\u5927\u4E8E" },
+  { re: /(?<=\d[^。，；\n]{0,6})以内/g, suggestion: "\u4E0D\u8D85\u8FC7" },
+  // 冗词
+  { re: /的话/g, suggestion: "\u5220\u9664" },
+  { re: /一下(?!子)/g, suggestion: "\u5220\u9664" },
+  { re: /相关(?!性|系数|联)/g, suggestion: "\u5199\u51FA\u5177\u4F53\u5BF9\u8C61" },
+  { re: /(?<=在[^，。]{0,12})的?情况下/g, suggestion: "\u6539\u4E3A\u300C\u2026\u2026\u65F6\u300D" },
+  { re: /其实|事实上|实际上|所谓/g, suggestion: "\u5220\u9664" },
+  { re: /也就是说/g, suggestion: "\u5373" },
+  // 情态：强制、禁止、建议各用一个词
+  { re: /应该|应当/g, suggestion: "\u5F3A\u5236\u7528\u300C\u5FC5\u987B\u300D\uFF0C\u63A8\u8350\u7528\u300C\u5EFA\u8BAE\u300D" },
+  { re: /一定要|务必|千万(?=不|别|要|记)/g, suggestion: "\u5FC5\u987B" },
+  { re: /不得(?!不|已)|不准|不许/g, suggestion: "\u7981\u6B62\uFF0C\u6216\u300C\u4E0D\u8981\u300D" },
+  { re: /最好(?!的)/g, suggestion: "\u5EFA\u8BAE" },
+  // 一个意义一个词
+  { re: /单击|点按/g, suggestion: "\u70B9\u51FB" },
+  { re: /键入/g, suggestion: "\u8F93\u5165" },
+  { re: /登出/g, suggestion: "\u9000\u51FA\u767B\u5F55" },
+  { re: /入参/g, suggestion: "\u53C2\u6570" },
+  { re: /出参/g, suggestion: "\u8FD4\u56DE\u503C" },
+  { re: /报错/g, suggestion: "\u540D\u8BCD\u7528\u300C\u9519\u8BEF\u300D\uFF0C\u52A8\u8BCD\u7528\u300C\u8FD4\u56DE\u9519\u8BEF\u300D" },
+  { re: /缺省/g, suggestion: "\u9ED8\u8BA4" },
+  { re: /开启/g, suggestion: "\u529F\u80FD\u7528\u300C\u542F\u7528\u300D\uFF0C\u6587\u4EF6\u548C\u9875\u9762\u7528\u300C\u6253\u5F00\u300D\uFF0C\u7A0B\u5E8F\u7528\u300C\u542F\u52A8\u300D" },
+  // 错别字
+  { re: /登陆/g, suggestion: "\u767B\u5F55" },
+  { re: /帐号/g, suggestion: "\u8D26\u53F7" },
+  { re: /阀值/g, suggestion: "\u9608\u503C" },
+  { re: /布署/g, suggestion: "\u90E8\u7F72" },
+  // 句式
+  {
+    re: /(?<=(?:、[^、，。；：\n]{1,16}|(?:和|及|以及)[^，。；\n]{1,16}))等(?:等)?(?!待|候|级|于|同|价|号|式|效|比|分|距|量|温|高|长|边|到|着)/g,
+    rule: "open-list",
+    message: "\u5F00\u653E\u5217\u4E3E",
+    suggestion: "\u5217\u5168\uFF0C\u6216\u5199\u6570\u91CF\u5E76\u7528\u300C\u5305\u62EC\u300D\u5F15\u51FA"
+  },
+  {
+    re: /明天|后天|昨天|前天|下周|上周|下个月|上个月|近期|稍后|过几天/g,
+    rule: "relative-time",
+    message: "\u76F8\u5BF9\u65F6\u95F4",
+    suggestion: "\u5199\u7EDD\u5BF9\u65E5\u671F\u6216\u65F6\u957F"
+  }
+]);
+var ZH_PASSIVE = /被(?!动|告|迫|称为|视为)|受到|遭到|为[^，。]{1,10}所(?!以|有|属)/;
+var ZH_NOT_IMPERATIVE = /^(?:请(?!求)|您|你|用户(?:需要|可以|应该|应当|必须)?|需要|需(?!求))/;
 
 // src/lint/ste.js
 var LIMITS = { zh: { procedural: 35, descriptive: 45 }, en: { procedural: 20, descriptive: 25 } };
@@ -4546,10 +4608,19 @@ function checkUnit(text, line, kind, out) {
     if (lang === "en" && PASSIVE.test(s)) {
       out.push({ line, rule: "passive", message: `\u7591\u4F3C\u88AB\u52A8\u8BED\u6001\uFF1A"${s.match(PASSIVE)[0]}"`, suggestion: "\u6539\u4E3A\u4E3B\u52A8\u8BED\u6001" });
     }
+    if (lang === "zh" && !isJapanese(s)) {
+      if (ZH_PASSIVE.test(s)) {
+        out.push({ line, rule: "passive", message: `\u7591\u4F3C\u88AB\u52A8\u53E5\uFF1A"${s.match(ZH_PASSIVE)[0]}"`, suggestion: "\u6539\u4E3A\u4E3B\u52A8\u53E5\uFF0C\u5199\u51FA\u6267\u884C\u8005" });
+      }
+      if (kind === "procedural" && ZH_NOT_IMPERATIVE.test(s)) {
+        out.push({ line, rule: "imperative", message: `\u6B65\u9AA4\u4E0D\u4EE5\u52A8\u8BCD\u5F00\u5934\uFF1A"${s.match(ZH_NOT_IMPERATIVE)[0]}"`, suggestion: "\u53BB\u6389\u300C\u8BF7 / \u60A8 / \u9700\u8981\u300D\uFF0C\u52A8\u8BCD\u5F00\u5934" });
+      }
+    }
   }
   const lexical = [
     ...EN_RE.flatMap(({ re: re3, suggestion }) => [...text.matchAll(re3)].map((m) => ({ index: m.index, rule: "word", message: `\u4E0D\u63A8\u8350 "${m[0]}"`, suggestion }))),
-    ...(ja ? [] : ZH_LIGHT_VERBS).flatMap(({ re: re3, label }) => [...text.matchAll(re3)].map((m) => ({ index: m.index, rule: "word", message: `\u865A\u52A8\u8BCD "${m[0]}"\uFF08${label}\uFF09`, suggestion: `\u76F4\u63A5\u7528\u300C${m[1]}\u300D` })))
+    ...(ja ? [] : ZH_LIGHT_VERBS).flatMap(({ re: re3, label }) => [...text.matchAll(re3)].map((m) => ({ index: m.index, rule: "word", message: `\u865A\u52A8\u8BCD "${m[0]}"\uFF08${label}\uFF09`, suggestion: `\u76F4\u63A5\u7528\u300C${m[1]}\u300D` }))),
+    ...(ja ? [] : ZH_WORDS).flatMap(({ re: re3, rule = "word", message, suggestion }) => [...text.matchAll(re3)].map((m) => ({ index: m.index, rule, message: `${message ?? "\u4E0D\u63A8\u8350"} "${m[0]}"`, suggestion })))
   ];
   out.push(...lexical.sort((a, b) => a.index - b.index).map(({ index, ...w }) => ({ line, ...w })));
   for (const s of sentences) {

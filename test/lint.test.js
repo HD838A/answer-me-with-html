@@ -83,8 +83,31 @@ test('callout 正文参与检查；表格普通单元格参与检查', () => {
   assert.deepEqual(ws.map((w) => [w.line, w.suggestion]), [[3, 'use'], [7, 'start']]);
 });
 
+test('中文非推荐词：含糊的量词、冗词、错别字，按出现顺序给出建议', () => {
+  const ws = lint('## A\n尽快登陆系统，看一下相关配置。');
+  assert.deepEqual(rules(ws), ['word', 'word', 'word', 'word']);
+  assert.deepEqual(ws.map((w) => w.suggestion), ['写出具体时限', '登录', '删除', '写出具体对象']);
+});
+
+test('中文非推荐词：数字后的以上/以下、开放列举、相对时间；不误报', () => {
+  assert.deepEqual(rules(lint('## A\n并发数 100 以上。')), ['word']);
+  assert.deepEqual(rules(lint('## A\n以上步骤完成后，服务可用。')), []);
+  assert.deepEqual(rules(lint('## A\n支持 MySQL、PostgreSQL 等数据库。')), ['open-list']);
+  assert.deepEqual(rules(lint('## A\n保存文件、关闭窗口，等待 3 秒。')), []);
+  assert.deepEqual(rules(lint('## A\n旧接口近期下线。')), ['relative-time']);
+  assert.deepEqual(rules(lint('## A\n任务进行中，十分钟后再看。')), []);
+});
+
+test('中文被动句；步骤不以动词开头', () => {
+  assert.deepEqual(rules(lint('## A\n配置文件会被服务读取。')), ['passive']);
+  assert.deepEqual(rules(lint('## A\n服务读取配置文件。被动打开不算。')), []);
+  assert.deepEqual(rules(lint('## A\n1. 请点击「保存」。')), ['imperative']);
+  assert.deepEqual(rules(lint('## A\n1. 点击「保存」。\n- 请求参数如下。')), [], '无序列表和描述句不查祈使');
+  assert.deepEqual(rules(lint('## A\n1. 手順に従って設定を保存する。')), [], '日文不套中文规则');
+});
+
 test('intro 导语也参与检查', () => {
-  assert.equal(lint('导语里 utilize 一下。\n## A\nx').length, 1);
+  assert.equal(lint('导语里 utilize 工具。\n## A\nx').length, 1);
 });
 
 test('formatWarning: 行号 + 规则 + 信息 + 建议', () => {

@@ -340,6 +340,7 @@ Answer me with HTML turns the parts a machine can check into an English and Chin
 
 - **Length:** Steps stay under 20 English words or 35 Chinese characters. Descriptions stay under 25 words or 45 characters. Paragraphs have at most 6 sentences.
 - **Words:** Prefer common words: "use", not "utilize"; "before", not "prior to". In Chinese, drop empty verbs: write 优化, not 进行优化.
+- **Chinese vocabulary:** Vague quantities (尽快, 大概, 若干), filler (的话, 一下, 相关), 以上 / 以下 after a number (the endpoint is ambiguous), open-ended lists ending in 等, relative time, one-meaning-one-word choices (单击 → 点击) and common typos (登陆 → 登录). Chinese passive markers and steps that do not start with a verb are flagged too. These rules come from [Simplified Technical Chinese](https://github.com/mzopedia/simplified-technical-chinese), a controlled Chinese modelled on the STE method.
 - **Style:** Flags English passive voice, three or more 的 in one sentence, and stock phrases such as 赋能 and 闭环.
 - **Japanese:** A draft with kana is treated as Japanese: the page buttons are in Japanese and the page gets `lang="ja"`. Only the length rules apply, with the Chinese character limits. Write `lang: ja` in the draft to force it.
 

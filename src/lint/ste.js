@@ -1,10 +1,11 @@
 // STE 受控写作检查（只约束稿件里的说明文字）。
-// 规则：句长、段长、非推荐词、英文被动语态、中文虚动词 / "的"字连用 / 套话。全部为警告，严格度由 style 决定。
+// 规则：句长、段长、非推荐词、英文被动语态、中文虚动词 / "的"字连用 / 套话 / 被动标记 / 步骤非祈使开头。
+// 全部为警告，严格度由 style 决定。
 // 含假名的日文只查句长与段长：日文的"的"是后缀（基本的、具体的），不是中文的结构助词。
 // 跳过：代码与行内代码、~~删除线~~（反例展示）、含 no 状态的表格行、标题、除 callout 外的组件。
 
 import { EN_WORDS } from './wordlist.en.js';
-import { ZH_LIGHT_VERBS, ZH_CLICHES } from './wordlist.zh.js';
+import { ZH_LIGHT_VERBS, ZH_CLICHES, ZH_WORDS, ZH_PASSIVE, ZH_NOT_IMPERATIVE } from './wordlist.zh.js';
 import { isCJK, isJapanese } from '../svg/text.js';
 
 const LIMITS = { zh: { procedural: 35, descriptive: 45 }, en: { procedural: 20, descriptive: 25 } };
@@ -106,10 +107,19 @@ function checkUnit(text, line, kind, out) {
     if (lang === 'en' && PASSIVE.test(s)) {
       out.push({ line, rule: 'passive', message: `疑似被动语态："${s.match(PASSIVE)[0]}"`, suggestion: '改为主动语态' });
     }
+    if (lang === 'zh' && !isJapanese(s)) {
+      if (ZH_PASSIVE.test(s)) {
+        out.push({ line, rule: 'passive', message: `疑似被动句："${s.match(ZH_PASSIVE)[0]}"`, suggestion: '改为主动句，写出执行者' });
+      }
+      if (kind === 'procedural' && ZH_NOT_IMPERATIVE.test(s)) {
+        out.push({ line, rule: 'imperative', message: `步骤不以动词开头："${s.match(ZH_NOT_IMPERATIVE)[0]}"`, suggestion: '去掉「请 / 您 / 需要」，动词开头' });
+      }
+    }
   }
   const lexical = [
     ...EN_RE.flatMap(({ re, suggestion }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `不推荐 "${m[0]}"`, suggestion }))),
     ...(ja ? [] : ZH_LIGHT_VERBS).flatMap(({ re, label }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `虚动词 "${m[0]}"（${label}）`, suggestion: `直接用「${m[1]}」` }))),
+    ...(ja ? [] : ZH_WORDS).flatMap(({ re, rule = 'word', message, suggestion }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule, message: `${message ?? '不推荐'} "${m[0]}"`, suggestion }))),
   ];
   out.push(...lexical.sort((a, b) => a.index - b.index).map(({ index, ...w }) => ({ line, ...w })));
   for (const s of sentences) {
