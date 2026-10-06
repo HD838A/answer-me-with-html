@@ -62,6 +62,14 @@ test('render: 表格状态词渲染为徽章', () => {
   assert.match(html, /am-table-wrap/);
 });
 
+test('render: 图片包含响应式样式和大图预览运行时', () => {
+  const { html } = renderDoc('## A 图片\n![示例](https://example.com/large.png)');
+  assert.match(html, /\.am-md img, \.am-intro img, \.am-panel-body img\s*\{/);
+  assert.match(html, /max-height: min\(72vh, 760px\)/);
+  assert.match(html, /am-lightbox/);
+  assert.match(html, /点击查看大图/);
+});
+
 test('render: html 围栏原样嵌入；未知语言作为转义后的代码块', () => {
   const { html } = renderDoc(SRC);
   assert.match(html, /<div class="raw-x">raw<\/div>/);

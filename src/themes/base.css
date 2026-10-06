@@ -82,6 +82,13 @@ html[data-theme="shadcn"] .am-panel-head { border-bottom-width: 1px; }
 .am-md blockquote { margin: 0 0 8px; padding: 2px 12px; border-left: 3px solid var(--line-2); color: var(--ink-2); }
 .am-md :not(pre) > code { font-size: 0.9em; background: var(--fill); padding: 1px 5px; border-radius: 4px; }
 .am-md hr { border: 0; border-top: 1px solid var(--line-2); margin: 12px 0; }
+.am-md img, .am-intro img, .am-panel-body img {
+  display: block; width: auto; max-width: 100%; height: auto; max-height: min(72vh, 760px);
+  object-fit: contain; margin: 10px auto; cursor: zoom-in; border-radius: var(--radius);
+}
+.am-md img:focus-visible, .am-intro img:focus-visible, .am-panel-body img:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 3px;
+}
 .am-md table { width: 100%; border-collapse: collapse; font-size: 13px; }
 .am-md th {
   text-align: left; font: 11px/1.3 var(--font-mono); color: var(--ink-2); font-weight: 400;
@@ -274,3 +281,22 @@ html[data-theme="shadcn"] .am-kv { border-color: var(--line); border-radius: var
 .am-panel--bare { border: 0; background: transparent; box-shadow: none; }
 .am-panel--bare > .am-panel-body { padding: 0; }
 .am-panel--bare .am-kv { background: var(--paper); }
+
+/* ── 图片大图预览 ────────────────────────── */
+.am-lightbox[hidden] { display: none; }
+.am-lightbox {
+  position: fixed; inset: 0; z-index: 100; display: grid; place-items: center;
+  padding: clamp(16px, 4vw, 48px); background: rgba(0, 0, 0, 0.78); backdrop-filter: blur(4px);
+}
+.am-lightbox img {
+  display: block; width: auto; max-width: 100%; max-height: 100%; height: auto;
+  object-fit: contain; cursor: zoom-out; box-shadow: 0 12px 48px rgba(0, 0, 0, 0.35);
+}
+.am-lightbox-close {
+  position: absolute; top: 14px; right: 14px; width: 36px; height: 36px; padding: 0;
+  border: 1px solid rgba(255, 255, 255, 0.45); border-radius: 50%; background: rgba(0, 0, 0, 0.35);
+  color: #fff; font: 24px/1 var(--font-sans); cursor: pointer;
+}
+.am-lightbox-close:hover { background: rgba(0, 0, 0, 0.6); }
+.am-lightbox-close:focus-visible { outline: 2px solid #fff; outline-offset: 3px; }
+body.am-lightbox-open { overflow: hidden; }
