@@ -1,7 +1,8 @@
-// 数据目录里的 state.json：记录首次使用、上次清理、版本检查等时间点。
-// 写入先写临时文件再改名，避免并发或中断时留下半截文件；读到坏文件时当作空状态。
-import { readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+// state.json in the data directory: records times such as first use, last cleanup and version check.
+// Writes go to a temp file then rename, so concurrency or interruption never leaves a partial file; a bad file reads as empty state.
+import { readFileSync, writeFileSync, renameSync } from 'node:fs';
 import { join } from 'node:path';
+import { ensureHome } from './home.js';
 
 export const DAY = 24 * 60 * 60 * 1000;
 
@@ -18,7 +19,7 @@ export function readState(home) {
 
 export function writeState(home, patch) {
   const next = { ...readState(home), ...patch };
-  mkdirSync(home, { recursive: true });
+  ensureHome(home);
   const tmp = `${statePath(home)}.${process.pid}.tmp`;
   writeFileSync(tmp, `${JSON.stringify(next, null, 2)}\n`);
   renameSync(tmp, statePath(home));

@@ -1,60 +1,70 @@
-// 视频稿 → 单文件播放页。画面复用页面组件；时间轴由每句旁白的音频时长（或估算时长）决定；
-// 播放页里的 render(t) 是确定性的：同一时刻永远画出同一帧，导出 MP4 时逐帧调用它。
-import { renderBlocks, detectLang, htmlLang, LintError, timestamp } from '../render.js';
-import { pageCss } from '../themes/index.js';
+// Video draft → single-file player page. Visuals reuse page components; the timeline comes from each narration line's audio duration (or estimated duration);
+// render(t) in the player page is deterministic: the same moment always draws the same frame, and MP4 export calls it frame by frame.
+import { renderBlocks, LintError, timestamp, hasDelta, hasChart } from '../render.js';
+import { resolveLanguage, detectLang } from '../language.js';
+import { videoCss } from '../themes/index.js';
+import { BUILTIN, AUTO, pickTheme } from '../themes/registry.js';
 import { lintDoc } from '../lint/ste.js';
 import { esc } from '../svg/text.js';
-import { VERSION, VIDEO_CSS, VIDEO_JS } from '../assets.js';
-import { parseVideo, buildTimeline, estimateSeconds, allBeats, VIDEO_THEMES } from './script.js';
-import { CHOICES, ParseError } from '../parse.js';
+import { VERSION, VIDEO_JS, VIDEO_EXPORT_JS, VIDEO_MUX_JS } from '../assets.js';
+import { rootTag, audioTag, sourceTag } from '../page.js';
+import { parseVideo, buildTimeline, estimateSeconds, allBeats } from './script.js';
+import { CHOICES, ParseError, raiseAll, applyOverrides } from '../parse.js';
+import { cspMeta } from '../csp.js';
 import { synthAll, mixTrack, SAMPLE_RATE } from './tts.js';
 
-const UI = {
-  zh: { play: '播放', pause: '暂停', chapters: '章节' },
-  en: { play: 'Play', pause: 'Pause', chapters: 'Chapters' },
-  ja: { play: '再生', pause: '一時停止', chapters: '章' },
-};
+// When provider is null, only captions are produced and durations are estimated from word count. A line whose language the
+// voice has no voice for keeps its caption the same way (captionsOnly says which languages those were).
+// themes: the theme set to pick from (the CLI passes the built-in themes plus the user's theme files).
+// previousLanguage: the language the page had before (a patched video keeps it unless the draft declares one).
+export async function renderVideo(source, { provider = null, cacheDir, defaults = {}, overrides = {}, onProgress, themes = BUILTIN, previousLanguage } = {}) {
+  const themeChoices = themes.choices('video');
+  const video = parseVideo(source, { defaults, themeChoices });
+  const picked = applyOverrides(video.meta, overrides, { ...CHOICES, theme: themeChoices });
+  const problem = themes.problem(picked.theme, 'video');
+  if (problem) throw new ParseError(problem, 0);
+  const meta = picked.theme === AUTO ? { ...picked, theme: pickTheme({ scope: 'video' }) } : picked;
 
-// provider 为 null 时只出字幕，时长按字数估算。
-export async function renderVideo(source, { provider = null, cacheDir, defaults = {}, overrides = {}, onProgress } = {}) {
-  const video = parseVideo(source, { defaults });
-  const meta = applyOverrides(video.meta, overrides);
-
-  // 旁白每行是一拍，连续多行不算"超长段落"。
-  const warnings = meta.style === 'off' ? [] : lintDoc(video.doc).filter((w) => w.rule !== 'paragraph-length');
+  const language = resolveLanguage({ declared: meta.lang, previous: previousLanguage, text: source });
+  // Each narration line is one beat; consecutive lines do not count as an "overlong paragraph".
+  const warnings = meta.style === 'off' ? [] : lintDoc(video.doc, language).filter((w) => w.rule !== 'paragraph-length');
   if (meta.style === 'strict' && warnings.length) throw new LintError(warnings);
 
   const beats = allBeats(video);
-  const { clips, durations } = await voiceBeats(beats, provider, cacheDir, onProgress);
+  // A declared language applies to every line; otherwise each line is read in the language of its own text. The tag keeps the
+  // script it resolved to, so a Traditional Chinese line asks for a Traditional Chinese voice and not the Simplified one.
+  const languageOf = (text) => (language.declared ? language.tag : detectLang(text));
+  const { clips, durations, captionsOnly } = await voiceBeats(beats, provider, cacheDir, onProgress, languageOf);
   const timeline = buildTimeline(video, durations);
   const flat = [...timeline.title.beats, ...timeline.scenes.flatMap((s) => s.beats)];
-  const wav = clips ? mixTrack(clips, flat.map((b) => b.start), timeline.duration) : null;
+  const wav = clips?.some(Boolean) ? mixTrack(clips, flat.map((b) => b.start), timeline.duration) : null;
 
-  const stats = { panels: video.scenes.length, components: {} };
-  const scenesHtml = renderScenes(video, meta, timeline, { seq: 0, stats });
-  const lang = meta.lang || detectLang(source);
-  const html = shell({ meta, lang, scenesHtml, data: playerData(video, meta, timeline), wav, source });
-  return { html, wav, warnings, stats, meta, duration: timeline.duration, beats: beats.length };
+  const stats = { panels: video.scenes.length, components: {}, componentWarnings: [], htmlWarnings: [] };
+  const errors = [];
+  const scenesHtml = renderScenes(video, meta, timeline, { seq: 0, stats, errors, ui: language.ui, dir: language.dir, video: true }, language.videoUi);
+  raiseAll(errors);
+  const html = shell({ meta, language, scenesHtml, data: playerData(video, meta, timeline), wav, voice: wav ? provider.voice : undefined, source, embedded: themes.embedFor(meta.theme, 'video') });
+  return { html, wav, warnings, stats, meta, language, duration: timeline.duration, beats: beats.length, captionsOnly };
 }
 
-// 命令行参数优先于稿件与配置；返回新的 meta，不改动原对象。
-function applyOverrides(meta, overrides) {
-  const allowed = { ...CHOICES, theme: VIDEO_THEMES };
-  const set = Object.entries(overrides).filter(([, v]) => v !== undefined);
-  for (const [key, value] of set) {
-    if (allowed[key] && !allowed[key].includes(String(value))) {
-      throw new ParseError(`${key} 的值 "${value}" 无效，可选：${allowed[key].join(' | ')}`, 0);
-    }
+// With a voice-over each beat lasts as long as its audio; a beat the voice could not read lasts as long as its text suggests,
+// and its language is reported so the caller can say why.
+async function voiceBeats(beats, provider, cacheDir, onProgress, languageOf) {
+  if (!provider) return { clips: null, captionsOnly: [], durations: beats.map((b) => estimateSeconds(b.text)) };
+  onProgress?.(`Voice-over: ${provider.name}, ${beats.length} line${beats.length === 1 ? '' : 's'}`);
+  const clips = await synthAll(beats.map((b) => b.text), provider, { cacheDir, languageOf });
+  const silent = new Map();
+  clips.forEach((clip, i) => {
+    if (clip) return;
+    const tag = languageOf(beats[i].text);
+    silent.set(tag, (silent.get(tag) ?? 0) + 1);
+  });
+  const captionsOnly = [...silent].map(([language, lines]) => ({ language, lines }));
+  for (const { language, lines } of captionsOnly) {
+    const n = `${lines} line${lines === 1 ? '' : 's'}`;
+    onProgress?.(`No ${language} voice on this machine: captions only for ${n}`);
   }
-  return { ...meta, ...Object.fromEntries(set) };
-}
-
-// 有配音时每拍时长取音频长度；否则按字数估算。
-async function voiceBeats(beats, provider, cacheDir, onProgress) {
-  if (!provider) return { clips: null, durations: beats.map((b) => estimateSeconds(b.text)) };
-  onProgress?.(`配音：${provider.name}，${beats.length} 句`);
-  const clips = await synthAll(beats.map((b) => b.text), provider, { cacheDir });
-  return { clips, durations: clips.map((c) => c.length / SAMPLE_RATE) };
+  return { clips, captionsOnly, durations: clips.map((c, i) => (c ? c.length / SAMPLE_RATE : estimateSeconds(beats[i].text))) };
 }
 
 function playerData(video, meta, timeline) {
@@ -64,23 +74,24 @@ function playerData(video, meta, timeline) {
     segments: [timeline.title, ...timeline.scenes].map((s, i) => ({
       start: s.start,
       end: s.end,
+      id: i === 0 ? '' : s.id,
       title: i === 0 ? meta.title : s.title,
       beats: s.beats.map((b, k) => ({ ...b, html: captionHtml(beatsOf(video, i)[k].raw) })),
     })),
   };
 }
 
-function renderScenes(video, meta, timeline, ctx) {
+function renderScenes(video, meta, timeline, ctx, ui) {
   const total = video.scenes.length;
   return [
-    titleScene(meta, renderBlocks(video.intro, ctx), { scenes: total, duration: timeline.duration }),
-    ...video.scenes.map((s, i) => scene(s, i, total, renderBlocks(s.blocks, ctx))),
+    titleScene(meta, renderBlocks(video.intro, ctx), { scenes: total, duration: timeline.duration }, ui),
+    ...video.scenes.map((s, i) => scene(s, i, total, renderBlocks(s.blocks, ctx), ui)),
   ].join('\n');
 }
 
 const beatsOf = (video, i) => (i === 0 ? video.introBeats : video.scenes[i - 1].beats);
 
-// 字幕：[名字] 变成高亮词。
+// Captions: [name] becomes a highlighted word.
 export function captionHtml(raw) {
   return raw.split(/(\[[^\]\n]+\])/).map((part) => {
     const m = part.match(/^\[([^\]]+)\]$/);
@@ -93,24 +104,24 @@ export function formatClock(seconds) {
   return `${Math.floor(total / 60)}:${String(total % 60).padStart(2, '0')}`;
 }
 
-function titleScene(meta, introHtml, { scenes, duration }) {
+function titleScene(meta, introHtml, { scenes, duration }, ui) {
   const mmss = formatClock(duration);
-  const cells = [['DRAWN', 'Answer me with HTML'], ['DATE', timestamp().slice(0, 10)], ['SCENES', String(scenes)], ['DURATION', mmss]];
-  const block = `<div class="amv-titleblock">${cells.map(([k, v]) => `<div><b>${k}</b><span>${esc(v)}</span></div>`).join('')}</div>`;
+  const cells = [[ui.drawn, 'Answer me with HTML'], [ui.date, timestamp().slice(0, 10)], [ui.scenes, String(scenes)], [ui.duration, mmss]];
+  const block = `<div class="amv-titleblock">${cells.map(([k, v]) => `<div><b>${esc(k)}</b><span>${esc(v)}</span></div>`).join('')}</div>`;
   return `<section class="amv-scene amv-scene--title" data-i="0">
 <div class="amv-title-wrap"><h1 class="amv-title">${esc(meta.title || 'Answer me with HTML')}</h1>${meta.subtitle ? `<p class="amv-subtitle">${esc(meta.subtitle)}</p>` : ''}${introHtml ? `<div class="amv-intro">${introHtml}</div>` : ''}${block}</div>
 </section>`;
 }
 
-function scene(s, i, total, body) {
+function scene(s, i, total, body, ui) {
   const pad = (n) => String(n).padStart(2, '0');
   return `<section class="amv-scene" data-i="${i + 1}">
-<header class="amv-scene-head"><span class="amv-scene-n">${esc(s.id)}</span><span class="amv-scene-title">${esc(s.title)}</span><span class="amv-scene-meta">SHEET ${pad(i + 1)} / ${pad(total)}</span></header>
+<header class="amv-scene-head"><span class="amv-scene-n">${esc(s.id)}</span><span class="amv-scene-title">${esc(s.title)}</span><span class="amv-scene-meta">${esc(ui.sheet.replace('{n}', pad(i + 1)).replace('{total}', pad(total)))}</span></header>
 <div class="amv-body"><div class="amv-fit">${body}</div></div>
 </section>`;
 }
 
-// 图纸外框与坐标刻度（只在 blueprint 主题显示），固定在镜头之外。
+// Drawing frame and coordinate ticks (hidden unless the theme shows .amv-sheet), fixed outside the camera.
 function sheetFrame() {
   const ruler = (side, labels) => `<div class="amv-ruler amv-ruler--${side}">${labels.map((l) => `<span>${l}</span>`).join('')}</div>`;
   const nums = [1, 2, 3, 4, 5, 6, 7, 8];
@@ -118,19 +129,24 @@ function sheetFrame() {
   return `<div class="amv-sheet" aria-hidden="true">${ruler('top', nums)}${ruler('bottom', nums)}${ruler('left', letters)}${ruler('right', letters)}</div>`;
 }
 
-function shell({ meta, lang, scenesHtml, data, wav, source }) {
-  const ui = UI[lang] ?? UI.zh;
+// The three inline scripts, as the browser reads them: the policy pins a hash of exactly this text.
+const MUX_SCRIPT = `\n${VIDEO_MUX_JS}`;
+const EXPORT_SCRIPT = `\n${VIDEO_EXPORT_JS}`;
+const PLAYER_SCRIPT = `\n${VIDEO_JS}`;
+
+function shell({ meta, language, scenesHtml, data, wav, voice, source, embedded }) {
+  const ui = language.videoUi;
   const json = JSON.stringify(data).replace(/</g, '\\u003c');
   return `<!doctype html>
-<html lang="${htmlLang(lang)}" data-theme="${esc(meta.theme)}" data-mode="${meta.theme === '3b1b' || meta.mode === 'dark' ? 'dark' : 'light'}" data-video>
+${rootTag({ lang: language.htmlLang, dir: language.dir, theme: meta.theme, mode: embedded.find((t) => t.name === meta.theme).mode ?? (meta.mode === 'dark' ? 'dark' : 'light'), style: meta.style, voice, video: true })}
 <head>
 <meta charset="utf-8">
+${cspMeta([MUX_SCRIPT, EXPORT_SCRIPT, PLAYER_SCRIPT])}
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="generator" content="Answer me with HTML ${VERSION}">
 <title>${esc(meta.title || 'Answer me with HTML')}</title>
 <style>
-${pageCss()}
-${VIDEO_CSS}
+${videoCss(embedded, { diff: scenesHtml.includes('class="am-codeblock am-codeblock--diff"'), delta: hasDelta(scenesHtml), rtl: language.dir === 'rtl', chart: hasChart(scenesHtml) })}
 </style>
 </head>
 <body>
@@ -149,13 +165,17 @@ ${scenesHtml}
 <button class="amv-btn" type="button" data-amv="toggle" data-play="${esc(ui.play)}" data-pause="${esc(ui.pause)}" aria-label="${esc(ui.play)}">▶</button>
 <span class="amv-time">0:00 / 0:00</span>
 <div class="amv-track"><input class="amv-seek" type="range" min="0" step="0.01" value="0" aria-label="seek"><div class="amv-marks"></div></div>
+<button class="amv-btn amv-rate" type="button" data-amv="rate" data-speed="${esc(ui.speed)}" aria-label="${esc(ui.speed)}">1×</button>
+<button class="amv-btn amv-export" type="button" data-amv="export" data-label="${esc(ui.export)}" data-icon="&#8681;" aria-label="${esc(ui.export)}">&#8681;</button>
 <span class="amv-brand">Answer me with HTML ${VERSION} · ${esc(timestamp())}</span>
 </div>
+<nav class="amv-chapters" aria-label="${esc(ui.chapters)}"></nav>
 <script type="application/json" id="amv-data">${json}</script>
-${wav ? `<audio id="amv-audio" preload="auto" src="data:audio/wav;base64,${wav.toString('base64')}"></audio>` : ''}
-<textarea id="am-source" hidden readonly aria-hidden="true">${esc(source)}</textarea>
-<script>
-${VIDEO_JS}</script>
+${wav ? audioTag(wav) : ''}
+${sourceTag(source)}
+<script>${MUX_SCRIPT}</script>
+<script>${EXPORT_SCRIPT}</script>
+<script>${PLAYER_SCRIPT}</script>
 </body>
 </html>
 `;

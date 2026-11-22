@@ -2,8 +2,8 @@ import { test, beforeEach, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
-import { join } from 'node:path';
-import { configPath, readConfig, setConfig, resetConfig, CONFIG_KEYS, ConfigError } from '../src/config.js';
+import { join, resolve } from 'node:path';
+import { configPath, readConfig, setConfig, resetConfig, CONFIG_KEYS, ConfigError, pagesDir } from '../src/config.js';
 import { renderDoc } from '../src/render.js';
 
 let home;
@@ -14,15 +14,15 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(home, { recursive: true, force: true }));
 
-test('configPath: 位于 AM_HOME/config.json', () => {
+test('configPath: is AM_HOME/config.json', () => {
   assert.equal(configPath(env), join(home, 'config.json'));
 });
 
-test('readConfig: 文件不存在时返回默认值', () => {
-  assert.deepEqual(readConfig(env).values, { open: true, always: true, theme: 'blueprint', mode: 'auto', style: '80', voice: 'auto', update_check: true });
+test('readConfig: returns the defaults when the file does not exist', () => {
+  assert.deepEqual(readConfig(env).values, { open: true, theme: 'auto', mode: 'auto', style: '80', voice: 'auto', update_check: true, close_after_reply: false, colophon: true, pages_dir: '', scale: 1 });
 });
 
-test('setConfig: 布尔值接受 on/off/true/false/开/关，写入文件', () => {
+test('setConfig: booleans accept on/off/true/false/`开`/`关` and are written to the file', () => {
   setConfig('open', 'off', env);
   assert.equal(readConfig(env).values.open, false);
   setConfig('open', '开', env);
@@ -30,7 +30,16 @@ test('setConfig: 布尔值接受 on/off/true/false/开/关，写入文件', () =
   assert.deepEqual(JSON.parse(readFileSync(configPath(env), 'utf8')), { open: true });
 });
 
-test('setConfig: 枚举值校验，非法值给出可选项', () => {
+test('close_after_reply: off by default, and on / off are saved like the other switches', () => {
+  assert.equal(readConfig(env).values.close_after_reply, false);
+  setConfig('close_after_reply', 'on', env);
+  assert.equal(readConfig(env).values.close_after_reply, true);
+  setConfig('close_after_reply', 'off', env);
+  assert.equal(readConfig(env).values.close_after_reply, false);
+  assert.throws(() => setConfig('close_after_reply', '3', env), ConfigError);
+});
+
+test('setConfig: validates enum values and lists the choices for an invalid one', () => {
   setConfig('theme', 'shadcn', env);
   assert.equal(readConfig(env).values.theme, 'shadcn');
   assert.throws(() => setConfig('theme', 'neon', env), (e) => e instanceof ConfigError && /blueprint \| shadcn/.test(e.message));
@@ -38,38 +47,72 @@ test('setConfig: 枚举值校验，非法值给出可选项', () => {
   assert.throws(() => setConfig('open', 'maybe', env), ConfigError);
 });
 
-test('resetConfig: 单个键或全部恢复默认', () => {
+test('resetConfig: resets one key or all keys to the defaults', () => {
   setConfig('open', 'off', env);
   setConfig('theme', 'shadcn', env);
   resetConfig('open', env);
-  assert.deepEqual(readConfig(env).values, { open: true, always: true, theme: 'shadcn', mode: 'auto', style: '80', voice: 'auto', update_check: true });
+  assert.deepEqual(readConfig(env).values, { open: true, theme: 'shadcn', mode: 'auto', style: '80', voice: 'auto', update_check: true, close_after_reply: false, colophon: true, pages_dir: '', scale: 1 });
   resetConfig(undefined, env);
   assert.equal(existsSync(configPath(env)), false);
 });
 
-test('readConfig: 文件损坏时回退默认值并给出警告', () => {
+test('readConfig: falls back to the defaults with a warning when the file is broken', () => {
   writeFileSync(configPath(env), '{ not json');
   const { values, warning } = readConfig(env);
   assert.equal(values.open, true);
   assert.match(warning, /config\.json/);
 });
 
-test('readConfig: 忽略未知键和非法值', () => {
+test('readConfig: ignores unknown keys and invalid values', () => {
   writeFileSync(configPath(env), JSON.stringify({ open: 'yes-ish', theme: 'shadcn', extra: 1 }));
-  assert.deepEqual(readConfig(env).values, { open: true, always: true, theme: 'shadcn', mode: 'auto', style: '80', voice: 'auto', update_check: true });
+  assert.deepEqual(readConfig(env).values, { open: true, theme: 'shadcn', mode: 'auto', style: '80', voice: 'auto', update_check: true, close_after_reply: false, colophon: true, pages_dir: '', scale: 1 });
 });
 
-test('CONFIG_KEYS 每项都有中文说明', () => {
+test('scale: a number from 0.8 to 1.5 in steps of 0.05, stored as a number', () => {
+  assert.equal(CONFIG_KEYS.scale.type, 'number');
+  assert.equal(CONFIG_KEYS.scale.default, 1);
+  assert.equal(readConfig(env).values.scale, 1);
+  setConfig('scale', '1.15', env);
+  assert.equal(readConfig(env).values.scale, 1.15);
+  assert.equal(typeof JSON.parse(readFileSync(configPath(env), 'utf8')).scale, 'number');
+  for (const bad of ['0.5', '2', 'big', '1.13']) {
+    assert.throws(() => setConfig('scale', bad, env), (e) => e instanceof ConfigError && /0\.8/.test(e.message) && /1\.5/.test(e.message) && /0\.05/.test(e.message), bad);
+  }
+  resetConfig('scale', env);
+  assert.equal(readConfig(env).values.scale, 1);
+});
+
+test('scale: an invalid stored value falls back to 1', () => {
+  writeFileSync(configPath(env), JSON.stringify({ scale: 1.13 }));
+  assert.equal(readConfig(env).values.scale, 1);
+  writeFileSync(configPath(env), JSON.stringify({ scale: '1.25' }));
+  assert.equal(readConfig(env).values.scale, 1.25);
+});
+
+test('CONFIG_KEYS: every key has a label', () => {
   for (const [key, spec] of Object.entries(CONFIG_KEYS)) assert.ok(spec.label, key);
 });
 
-test('render: 配置作为默认值，稿件 frontmatter 显式设置优先', () => {
+test('pages_dir: a folder path, empty by default, and a relative path is inside the data directory', () => {
+  assert.equal(CONFIG_KEYS.pages_dir.type, 'path');
+  assert.equal(CONFIG_KEYS.pages_dir.default, '');
+  assert.equal(pagesDir(env, readConfig(env)), join(home, 'pages'));
+  setConfig('pages_dir', join(home, 'notes'), env);
+  assert.equal(readConfig(env).values.pages_dir, join(home, 'notes'));
+  assert.equal(pagesDir(env, readConfig(env)), resolve(home, 'notes'));
+  setConfig('pages_dir', 'out/pages', env);
+  assert.equal(pagesDir(env, readConfig(env)), join(home, 'out', 'pages'));
+  resetConfig('pages_dir', env);
+  assert.equal(readConfig(env).values.pages_dir, '');
+});
+
+test('render: config gives the defaults, explicit draft frontmatter wins', () => {
   const defaults = { theme: 'shadcn', mode: 'dark', style: 'off' };
   const plain = renderDoc('## A\nUtilize it.', {}, defaults);
   assert.match(plain.html, /data-theme="shadcn" data-mode="dark"/);
-  assert.equal(plain.warnings.length, 0, 'style: off 来自配置');
+  assert.equal(plain.warnings.length, 0, 'style: off comes from config');
   const explicit = renderDoc('---\ntheme: blueprint\n---\n## A\nx', {}, defaults);
   assert.match(explicit.html, /data-theme="blueprint"/);
   const flag = renderDoc('---\ntheme: blueprint\n---\n## A\nx', { theme: 'shadcn' }, defaults);
-  assert.match(flag.html, /data-theme="shadcn"/, '命令行参数优先级最高');
+  assert.match(flag.html, /data-theme="shadcn"/, 'command-line arguments win');
 });

@@ -1,76 +1,65 @@
-// 主题 = 一组 CSS 变量。组件样式（base.css）只引用变量，因此切换主题只需切换 data-theme。
-// 每个主题提供 light / dark 两套取值；auto 模式跟随系统 prefers-color-scheme。
+// Theme CSS: each theme's tokens become CSS variables under html[data-theme="<name>"], so switching themes only switches data-theme.
+// Component styles (base.css, video.css) reference only variables; a theme's decoration css is scoped to its own root selector.
+// Each theme provides light / dark values; auto mode follows the system prefers-color-scheme.
 
-import { BASE_CSS } from '../assets.js';
-
-const SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif';
-const MONO = 'ui-monospace, SFMono-Regular, "JetBrains Mono", Menlo, Consolas, "Liberation Mono", monospace';
-// 日文页面：日文字体排在中文字体前面。点名的中文字体会盖过 lang="ja"，汉字会用中文字形（直、込）。
-const JA_SANS = '-apple-system, BlinkMacSystemFont, "Segoe UI", "Hiragino Sans", "Hiragino Kaku Gothic ProN", "Yu Gothic UI", "Yu Gothic", Meiryo, "Noto Sans CJK JP", "Noto Sans JP", "PingFang SC", "Microsoft YaHei", Roboto, "Helvetica Neue", Arial, sans-serif';
-const JA_SERIF = '"CMU Serif", "Latin Modern Roman", "Iowan Old Style", "Palatino", "Hiragino Mincho ProN", "Yu Mincho", "Noto Serif CJK JP", "Noto Serif JP", "Songti SC", serif';
-
-const shared = { '--font-sans': SANS, '--font-mono': MONO };
-
-export const THEMES = Object.freeze({
-  blueprint: {
-    label: '图纸 Blueprint',
-    common: { ...shared, '--radius': '0px', '--shadow': 'none', '--bw': '1.5px', '--head-font': 'var(--font-sans)' },
-    light: {
-      '--bg': '#f6f6f3', '--paper': '#ffffff', '--ink': '#16181d', '--ink-2': '#4b5260', '--ink-3': '#8b929e',
-      '--line': '#1d2026', '--line-2': '#d6dae1', '--fill': '#f3f5f8',
-      '--accent': '#1d5fbf', '--accent-bg': '#e4ecf8',
-      '--ok': '#1d5fbf', '--ok-bg': '#e4ecf8', '--err': '#c62828', '--err-bg': '#fbeaea',
-      '--warn': '#a8620a', '--warn-bg': '#fdf3e2', '--head-bg': '#16181d', '--head-fg': '#ffffff',
-    },
-    dark: {
-      '--bg': '#081322', '--paper': '#0d1c31', '--ink': '#e6edf7', '--ink-2': '#a9b8cc', '--ink-3': '#6b7f99',
-      '--line': '#c9d6e8', '--line-2': '#23385a', '--fill': '#12253f',
-      '--accent': '#6ea8ff', '--accent-bg': '#16305a',
-      '--ok': '#6ea8ff', '--ok-bg': '#16305a', '--err': '#ff7070', '--err-bg': '#3b1620',
-      '--warn': '#f0b14a', '--warn-bg': '#3a2a10', '--head-bg': '#e6edf7', '--head-fg': '#081322',
-    },
-  },
-  shadcn: {
-    label: '卡片 shadcn',
-    common: { ...shared, '--radius': '8px', '--shadow': '0 1px 2px 0 rgba(0,0,0,0.05)', '--bw': '1px', '--head-font': 'var(--font-sans)' },
-    light: {
-      '--bg': '#fafafa', '--paper': '#ffffff', '--ink': '#09090b', '--ink-2': '#71717a', '--ink-3': '#a1a1aa',
-      '--line': '#e4e4e7', '--line-2': '#f0f0f2', '--fill': '#f4f4f5',
-      '--accent': '#2563eb', '--accent-bg': '#eff6ff',
-      '--ok': '#16a34a', '--ok-bg': '#f0fdf4', '--err': '#dc2626', '--err-bg': '#fef2f2',
-      '--warn': '#d97706', '--warn-bg': '#fffbeb', '--head-bg': '#18181b', '--head-fg': '#fafafa',
-    },
-    dark: {
-      '--bg': '#09090b', '--paper': '#121215', '--ink': '#fafafa', '--ink-2': '#a1a1aa', '--ink-3': '#71717a',
-      '--line': '#27272a', '--line-2': '#1c1c1f', '--fill': '#18181b',
-      '--accent': '#60a5fa', '--accent-bg': '#172554',
-      '--ok': '#4ade80', '--ok-bg': '#052e16', '--err': '#f87171', '--err-bg': '#450a0a',
-      '--warn': '#fbbf24', '--warn-bg': '#451a03', '--head-bg': '#fafafa', '--head-fg': '#18181b',
-    },
-  },
-});
+import { BASE_CSS, TABLE_CSS, DIFF_CSS, DELTA_CSS, RTL_CSS, CHART_CSS, MATH_CSS, FONT_CSS, VIDEO_CSS, UPDATE_CSS, CLOSE_AFTER_CSS } from '../assets.js';
+import { themes } from './registry.js';
+import { fontLanguages, langSelector } from './fonts.js';
+import { typeScaleCss } from './type-scale.js';
 
 const block = (selector, vars) =>
   `${selector} {\n${Object.entries(vars).map(([k, v]) => `  ${k}: ${v};`).join('\n')}\n}`;
 
-export function themeCss() {
-  return Object.entries(THEMES).map(([name, t]) => {
-    const sel = `html[data-theme="${name}"]`;
-    return [
-      block(`${sel}, ${sel}[data-mode="light"]`, { ...t.common, ...t.light }),
-      block(`${sel}[data-mode="dark"]`, t.dark),
-      `@media (prefers-color-scheme: dark) {\n${block(`${sel}[data-mode="auto"]`, t.dark)}\n}`,
-    ].join('\n');
-  }).join('\n\n') + `\n\n${JA_FONT_CSS}`;
+function tokenCss(sel, { common = {}, light = {}, dark = {} }, fixedMode) {
+  // Each mode block also sets color-scheme (#395): it tells the browser which native UI (scrollbar, form controls) to draw.
+  // auto says "light dark" outside the media query, so the browser follows the system the way the tokens below follow the query.
+  const baseScheme = fixedMode === 'dark' ? 'dark' : 'light';
+  const parts = [
+    block(`${sel}, ${sel}[data-mode="light"]`, { 'color-scheme': baseScheme, ...common, ...light }),
+    block(`${sel}[data-mode="dark"]`, { 'color-scheme': 'dark', ...dark }),
+    block(`${sel}[data-mode="auto"]`, { 'color-scheme': 'light dark' }),
+  ];
+  if (Object.keys(dark).length) {
+    parts.push(`@media (prefers-color-scheme: dark) {\n${block(`${sel}[data-mode="auto"]`, dark)}\n}`);
+  }
+  return parts.join('\n');
 }
 
-// [data-theme][data-mode] 让选择器比各主题（含视频的 3b1b）更具体，放在哪里都能生效。
-// 只有 3b1b 的视频标题用衬线体，其余主题的标题跟随 --head-font，所以衬线只覆盖 3b1b。
-const JA_FONT_CSS = [
-  block('html[lang="ja"][data-theme][data-mode]', { '--font-sans': JA_SANS }),
-  block('html[lang="ja"][data-theme="3b1b"][data-mode]', { '--v-title-font': JA_SERIF }),
-].join('\n');
+const pageSel = (t) => `html[data-theme="${t.name}"]`;
+const videoSel = (t) => `html[data-video][data-theme="${t.name}"]`;
+const scoped = (css, sel) => css.replace(/&/g, sel);
 
-export function pageCss() {
-  return `${themeCss()}\n\n${BASE_CSS}`;
+// Languages with their own fonts (src/languages): their fonts come before the Chinese ones, because a named Chinese font overrides the language.
+// [data-theme][data-mode] makes the selector more specific than every theme's tokens, so it works wherever it is placed.
+const languageFontCss = () => fontLanguages().map((l) => block(langSelector(l, 'html', '[data-theme][data-mode]'), { '--font-sans': l.fonts.sans }));
+
+// A theme that sets its own sans font keeps it on those pages: same selector shape as languageFontCss plus the theme name, so it wins.
+const ownLanguageFont = (t) => fontLanguages().map((l) => block(langSelector(l, 'html', `[data-theme="${t.name}"][data-mode]`), { '--font-sans': t.tokens.common['--font-sans'] }));
+
+// list: the page themes the page carries (default: the built-in ones). diff: the page has a diff block, delta: a diagram with change markers;
+// their styles come with the base ones. rtl: the page language is written right to left. base.css already uses logical properties;
+// rtl.css holds only what they cannot express (code stays left to right, label fonts, mirrored offsets). math: the page has a formula (src/math.js);
+// it carries the Temml styles with their font, about 20 KB, so a page without math does not. chart: the page has a chart (src/components/chart.js); it carries chart.css.
+// table: a Markdown table opted in to sort / filter, so its controls and print rules come with it. update: the page has the new-version button;
+// closeAfter: the page closes its tab after the reply is copied (the close_after_reply setting). fonts: every theme in list that names a
+// shipped font (`font`) brings its face, one copy per font, so the picker can switch to it; a page that carries no such theme stays
+// as small as before. A video page turns fonts off, because its player never switches theme.
+// scale: the reader's text size. It sets --am-scale after the type scale (src/themes/type-scale.js), which every page size multiplies; 1 adds nothing.
+export function pageCss(list = themes('page'), { diff = false, delta = false, rtl = false, math = false, chart = false, table = false, update = false, closeAfter = false, fonts = true, scale = 1 } = {}) {
+  const decorations = list.filter((t) => t.css).map((t) => scoped(t.css, pageSel(t)));
+  const fontFaces = fonts ? [...new Set(list.map((t) => t.font).filter((f) => f && FONT_CSS[f]))].map((f) => FONT_CSS[f]) : [];
+  const ownFonts = list.filter((t) => t.ownFont).flatMap(ownLanguageFont);
+  return [list.map((t) => tokenCss(pageSel(t), t.tokens, t.mode)).join('\n\n'), ...languageFontCss(), ...ownFonts, typeScaleCss(), ...(scale === 1 ? [] : [`html { --am-scale: ${scale}; }`]), BASE_CSS, ...(math ? [MATH_CSS] : []), ...(chart ? [CHART_CSS] : []), ...(table ? [TABLE_CSS] : []), ...(diff ? [DIFF_CSS] : []), ...(delta ? [DELTA_CSS] : []), ...(update ? [UPDATE_CSS] : []), ...(closeAfter ? [CLOSE_AFTER_CSS] : []), ...(rtl ? [RTL_CSS] : []), ...fontFaces, ...decorations].join('\n\n');
+}
+
+// list: the video themes the player carries (default: the built-in ones). rtl: the video language is written right to left; the page
+// styles bring rtl.css (its html[dir="rtl"][data-video] block mirrors the player), and a theme's video.rtlCss mirrors what its own css places.
+// The player has no theme picker, so its page styles carry no font face (pageCss fonts: false).
+export function videoCss(list = themes('video'), { diff = false, delta = false, rtl = false, chart = false } = {}) {
+  const parts = list.filter((t) => t.video).flatMap((t) => [
+    t.video.tokens ? tokenCss(videoSel(t), t.video.tokens, t.mode) : '',
+    t.video.css ? scoped(t.video.css, videoSel(t)) : '',
+    rtl && t.video.rtlCss ? scoped(t.video.rtlCss, videoSel(t)) : '',
+  ]).filter(Boolean);
+  return [pageCss(list.filter((t) => t.scope.includes('page')), { diff, delta, rtl, chart, fonts: false }), VIDEO_CSS, ...parts].join('\n\n');
 }

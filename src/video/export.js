@@ -1,73 +1,50 @@
-// --mp4：用本机 Chrome（无头模式，经 Chrome DevTools Protocol）逐帧调用播放页的 render(t) 并截图，
-// 再交给 ffmpeg 编码 H.264 并合成旁白音轨。不依赖 Playwright / Puppeteer。
+// Writing a video file next to the player page. Two ways:
+//   MP4    local Chrome (headless, via the Chrome DevTools Protocol) calls the player page's render(t) frame by frame and
+//          screenshots it, then ffmpeg encodes H.264 and muxes the narration track. No Playwright / Puppeteer dependency.
+//   WebM   the page encodes its own frames with WebCodecs and muxes the container with src/video/webm.js, which every
+//          player page carries (it drives the export button too). This module only starts it, watches it and writes the
+//          bytes it hands back. Needs Chrome only, no ffmpeg. VP9 video and Opus audio.
 import { spawn } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { hasCommand } from '../sys.js';
+import { openPage, ExportError } from '../chrome.js';
 
-export class ExportError extends Error {
-  constructor(message) {
-    super(message);
-    this.name = 'ExportError';
+export { findChrome, devtoolsUrl, connect, ExportError } from '../chrome.js';
+
+const CHROME_START_TIMEOUT_MS = 20000;
+const WIDTH = 1920;
+const HEIGHT = 1080;
+const QUALITY = 92;               // the JPEG quality of every captured frame
+const WEBM_BITRATE = 3_500_000;   // VP9 at 1080p30: flat slides stay clean at this rate
+const WEBM_SLICE = 1_048_572;     // 1 MiB rounded to a multiple of 3, so every base64 slice stands on its own
+const WEBM_POLL_MS = 250;         // how often the CLI looks at the page's progress
+
+// Start Chrome, open the page in export mode (stage 1:1, no controls) and hand the session to the caller, which must
+// close it: `finally { await player.close() }`. The Chrome launch and CDP client are shared with page export (src/chrome.js).
+async function openPlayer(htmlFile, { env, startTimeoutMs }) {
+  const player = await openPage(pathToFileURL(htmlFile).href, {
+    env, startTimeoutMs, width: WIDTH, height: HEIGHT, deviceScaleFactor: 1, scriptError: 'Player page script error',
+  });
+  const { page, evaluate, close, tmp } = player;
+  try {
+    const info = await evaluate('document.fonts.ready.then(() => { window.__amv.exportMode(); return { duration: window.__amv.duration, fps: window.__amv.fps }; })');
+    const screenshot = async () => (await page('Page.captureScreenshot', { format: 'jpeg', quality: QUALITY, clip: { x: 0, y: 0, width: WIDTH, height: HEIGHT, scale: 1 } })).data;
+    return { info, evaluate, screenshot, close, tmp };
+  } catch (e) {
+    await close();
+    throw e;
   }
 }
 
-const CDP_TIMEOUT_MS = 30000;
+export async function exportMp4(htmlFile, mp4File, { wav, env = process.env, onProgress = () => {}, startTimeoutMs = CHROME_START_TIMEOUT_MS } = {}) {
+  if (typeof WebSocket === 'undefined') throw new ExportError('MP4 export needs Node.js 22 or later (built-in WebSocket)');
+  if (!hasCommand('ffmpeg')) throw new ExportError('MP4 export needs ffmpeg: on macOS run brew install ffmpeg; on Linux install it with the package manager');
 
-const CHROME_PATHS = {
-  darwin: [
-    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
-    '/Applications/Chromium.app/Contents/MacOS/Chromium',
-    '/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge',
-    '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser',
-  ],
-  win32: [
-    'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
-    'C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe',
-  ],
-  linux: ['google-chrome', 'google-chrome-stable', 'chromium', 'chromium-browser', 'microsoft-edge'],
-};
-
-export function findChrome(env = process.env, platform = process.platform) {
-  const custom = env.AM_CHROME || env.CHROME_PATH;
-  if (custom) return custom;
-  const list = CHROME_PATHS[platform] ?? CHROME_PATHS.linux;
-  return list.find((p) => (p.includes('/') || p.includes('\\') ? existsSync(p) : hasCommand(p))) ?? null;
-}
-
-export async function exportMp4(htmlFile, mp4File, { wav, env = process.env, onProgress = () => {} } = {}) {
-  if (typeof WebSocket === 'undefined') throw new ExportError('导出 MP4 需要 Node.js 22 或更高版本（内置 WebSocket）');
-  if (!hasCommand('ffmpeg')) throw new ExportError('导出 MP4 需要 ffmpeg：macOS 用 brew install ffmpeg，Linux 用包管理器安装');
-  const chromePath = findChrome(env);
-  if (!chromePath) throw new ExportError('没有找到 Chrome / Chromium / Edge。可用环境变量 AM_CHROME 指定浏览器路径');
-
-  const tmp = mkdtempSync(join(tmpdir(), 'am-export-'));
-  const chrome = spawn(chromePath, [
-    '--headless=new', '--remote-debugging-port=0', `--user-data-dir=${join(tmp, 'profile')}`,
-    '--no-first-run', '--no-default-browser-check', '--hide-scrollbars', '--mute-audio',
-    '--force-device-scale-factor=1', '--window-size=1920,1080', 'about:blank',
-  ], { stdio: ['ignore', 'ignore', 'pipe'] });
-  let cdp = null;
+  const player = await openPlayer(htmlFile, { env, startTimeoutMs });
   try {
-    cdp = await connect(await devtoolsUrl(chrome));
-    const { targetId } = await cdp.send('Target.createTarget', { url: 'about:blank' });
-    const { sessionId } = await cdp.send('Target.attachToTarget', { targetId, flatten: true });
-    const page = (method, params) => cdp.send(method, params, sessionId);
-    await page('Emulation.setDeviceMetricsOverride', { width: 1920, height: 1080, deviceScaleFactor: 1, mobile: false });
-    await page('Page.enable');
-    const loaded = cdp.once('Page.loadEventFired');
-    await page('Page.navigate', { url: pathToFileURL(htmlFile).href });
-    await loaded;
-    const evaluate = async (expression) => {
-      const r = await page('Runtime.evaluate', { expression, awaitPromise: true, returnByValue: true });
-      if (r.exceptionDetails) throw new ExportError(`播放页脚本出错：${r.exceptionDetails.exception?.description ?? r.exceptionDetails.text}`);
-      return r.result.value;
-    };
-    const info = await evaluate('document.fonts.ready.then(() => { window.__amv.exportMode(); return { duration: window.__amv.duration, fps: window.__amv.fps }; })');
-
+    const { info, evaluate, screenshot, tmp } = player;
     const wavFile = wav ? join(tmp, 'voice.wav') : null;
     if (wav) writeFileSync(wavFile, wav);
     const ffmpeg = spawn('ffmpeg', [
@@ -80,22 +57,22 @@ export async function exportMp4(htmlFile, mp4File, { wav, env = process.env, onP
     let ffErr = '';
     let exited = false;
     ffmpeg.stderr.on('data', (d) => { ffErr += d; });
-    // ffmpeg 提前退出时，写入 stdin 会触发 EPIPE；这里吞掉，由 done 统一报错。
+    // When ffmpeg exits early, writing to stdin raises EPIPE; swallow it here and let done report the error.
     ffmpeg.stdin.on('error', () => {});
     const done = new Promise((resolve, reject) => {
-      ffmpeg.on('error', (e) => { exited = true; reject(new ExportError(`无法运行 ffmpeg：${e.message}`)); });
+      ffmpeg.on('error', (e) => { exited = true; reject(new ExportError(`Cannot run ffmpeg: ${e.message}`)); });
       ffmpeg.on('close', (code) => {
         exited = true;
         if (code === 0) resolve();
-        else reject(new ExportError(`ffmpeg 失败（${code}）：${ffErr.slice(0, 300)}`));
+        else reject(new ExportError(`ffmpeg failed (${code}): ${ffErr.slice(0, 300)}`));
       });
     });
-    done.catch(() => {}); // 先挂上处理器，避免帧循环期间出现未处理的 rejection
+    done.catch(() => {}); // attach the handler first, so no unhandled rejection occurs during the frame loop
 
     const frames = Math.ceil(info.duration * info.fps);
     for (let i = 0; i < frames && !exited; i++) {
       await evaluate(`render(${i / info.fps})`);
-      const { data } = await page('Page.captureScreenshot', { format: 'jpeg', quality: 92, clip: { x: 0, y: 0, width: 1920, height: 1080, scale: 1 } });
+      const data = await screenshot();
       if (exited) break;
       if (!ffmpeg.stdin.write(Buffer.from(data, 'base64'))) {
         await Promise.race([new Promise((r) => ffmpeg.stdin.once('drain', r)), done.catch(() => {})]);
@@ -106,71 +83,43 @@ export async function exportMp4(htmlFile, mp4File, { wav, env = process.env, onP
     await done;
     return { frames, duration: info.duration };
   } finally {
-    cdp?.close();
-    await new Promise((r) => {
-      if (chrome.exitCode !== null) return r();
-      const timer = setTimeout(r, 3000);
-      chrome.once('exit', () => { clearTimeout(timer); r(); });
-      chrome.kill();
-    });
-    try {
-      rmSync(tmp, { recursive: true, force: true, maxRetries: 3, retryDelay: 200 });
-    } catch {
-      // 临时目录清理失败不影响成片。
-    }
+    await player.close();
   }
 }
 
-function devtoolsUrl(chrome) {
-  return new Promise((resolve, reject) => {
-    let buf = '';
-    const timer = setTimeout(() => reject(new ExportError('Chrome 启动超时')), 20000);
-    chrome.on('error', (e) => { clearTimeout(timer); reject(new ExportError(`无法启动 Chrome：${e.message}`)); });
-    chrome.stderr.on('data', (d) => {
-      buf += d;
-      const m = buf.match(/DevTools listening on (ws:\/\/\S+)/);
-      if (m) {
-        clearTimeout(timer);
-        resolve(m[1]);
-      }
-    });
-  });
-}
+// The export without ffmpeg: the page encodes the picture and the narration with WebCodecs and muxes the container
+// itself (src/runtime/video-export.js), so this only starts it, reports progress and writes the bytes it hands back.
+// `am video --webm` takes this path; `--mp4` always goes through ffmpeg.
+export async function exportWebm(htmlFile, webmFile, { env = process.env, onProgress = () => {}, startTimeoutMs = CHROME_START_TIMEOUT_MS, bitrate = WEBM_BITRATE } = {}) {
+  if (typeof WebSocket === 'undefined') throw new ExportError('The built-in encoder needs Node.js 22 or later (built-in WebSocket)');
 
-// 极简 CDP 客户端：请求/响应按 id 配对，事件按方法名一次性等待。
-function connect(url) {
-  return new Promise((resolve, reject) => {
-    const ws = new WebSocket(url);
-    const pending = new Map();
-    const waiters = new Map();
-    let id = 0;
-    ws.addEventListener('error', () => reject(new ExportError('无法连接 Chrome DevTools')));
-    ws.addEventListener('message', (ev) => {
-      const msg = JSON.parse(ev.data);
-      if (msg.id && pending.has(msg.id)) {
-        const { ok, fail } = pending.get(msg.id);
-        pending.delete(msg.id);
-        if (msg.error) fail(new ExportError(`CDP ${msg.error.message}`));
-        else ok(msg.result);
-      } else if (msg.method && waiters.has(msg.method)) {
-        waiters.get(msg.method)(msg.params);
-        waiters.delete(msg.method);
-      }
-    });
-    ws.addEventListener('open', () => resolve({
-      send(method, params = {}, sessionId) {
-        return new Promise((ok, fail) => {
-          const msgId = ++id;
-          const timer = setTimeout(() => {
-            pending.delete(msgId);
-            fail(new ExportError(`Chrome 无响应（${method} 超过 ${CDP_TIMEOUT_MS / 1000} 秒）`));
-          }, CDP_TIMEOUT_MS);
-          pending.set(msgId, { ok: (v) => { clearTimeout(timer); ok(v); }, fail: (e) => { clearTimeout(timer); fail(e); } });
-          ws.send(JSON.stringify({ id: msgId, method, params, ...(sessionId ? { sessionId } : {}) }));
-        });
-      },
-      once: (method) => new Promise((r) => waiters.set(method, r)),
-      close: () => ws.close(),
-    }));
-  });
+  const player = await openPlayer(htmlFile, { env, startTimeoutMs });
+  try {
+    const { info, evaluate } = player;
+    if (!(await evaluate('window.__amvEnc.supported()'))) {
+      throw new ExportError('This browser cannot encode video (WebCodecs is missing). Install ffmpeg to export an MP4');
+    }
+    const started = await evaluate(`window.__amvEnc.start(${JSON.stringify({ bitrate })})`);
+    if (started.error) throw new ExportError(`The browser could not encode the video: ${started.error}`);
+
+    let state = null;
+    for (;;) {
+      state = await evaluate('window.__amvEnc.progress()');
+      if (state.error) throw new ExportError(`The browser stopped encoding: ${state.error}`);
+      onProgress(state.done, state.total);
+      if (!state.running) break;
+      await new Promise((r) => setTimeout(r, WEBM_POLL_MS));
+    }
+
+    const size = await evaluate('window.__amvEnc.size()');
+    const file = Buffer.alloc(size);
+    for (let at = 0; at < size; at += WEBM_SLICE) {
+      const slice = await evaluate(`window.__amvEnc.bytes(${at}, ${Math.min(WEBM_SLICE, size - at)})`);
+      Buffer.from(slice, 'base64').copy(file, at);
+    }
+    writeFileSync(webmFile, file);
+    return { frames: state.done, duration: info.duration, codec: state.codec, audio: Boolean(state.audio) };
+  } finally {
+    await player.close();
+  }
 }

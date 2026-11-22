@@ -1,47 +1,57 @@
-// Skill / 命令文件的 YAML 头必须能被严格的 YAML 解析器读取：npx skills 和各家 Agent 都用它加载 skill。
-// 我们自己的稿件解析器按行切分、更宽松，测不出这类问题（见 PR #2）。
+// The YAML header of skill and command files must parse with a strict YAML parser: npx skills and every agent load the skill with one.
+// Our own draft parser splits by line and is more lenient, so it cannot catch these problems (see PR #2).
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFileSync, readdirSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 
 const ROOT = fileURLToPath(new URL('..', import.meta.url));
+// skills/ is also the plugin root, so it holds commands/ and .claude-plugin/ beside the skill directories.
+const skillDirs = () => readdirSync(join(ROOT, 'skills')).filter((d) => existsSync(join(ROOT, 'skills', d, 'SKILL.md')));
 
 function frontmatterFiles() {
-  const skills = readdirSync(join(ROOT, 'skills')).map((d) => join('skills', d, 'SKILL.md'));
-  const commands = readdirSync(join(ROOT, 'commands')).filter((f) => f.endsWith('.md')).map((f) => join('commands', f));
+  const skills = skillDirs().map((d) => join('skills', d, 'SKILL.md'));
+  const commands = readdirSync(join(ROOT, 'skills/commands')).filter((f) => f.endsWith('.md')).map((f) => join('skills/commands', f));
   return [...skills, ...commands];
 }
 
 function frontmatter(file) {
   const m = readFileSync(join(ROOT, file), 'utf8').match(/^---\n([\s\S]*?)\n---\n/);
-  assert.ok(m, `${file} 缺少 YAML 头`);
+  assert.ok(m, `${file} has no YAML header`);
   return parse(m[1], { strict: true, uniqueKeys: true });
 }
 
-test('frontmatter: 所有 SKILL.md 与命令文件的 YAML 头都能被严格解析', () => {
+test('frontmatter: the YAML header of every SKILL.md and command file parses strictly', () => {
   const files = frontmatterFiles();
   assert.ok(files.length >= 2);
   for (const file of files) {
     let data;
-    assert.doesNotThrow(() => { data = frontmatter(file); }, `${file} 的 YAML 头无效`);
-    assert.equal(typeof data.description, 'string', `${file} 需要字符串 description`);
-    assert.ok(data.description.trim().length > 0, `${file} 的 description 为空`);
+    assert.doesNotThrow(() => { data = frontmatter(file); }, `${file} has an invalid YAML header`);
+    assert.equal(typeof data.description, 'string', `${file} needs a string description`);
+    assert.ok(data.description.trim().length > 0, `${file} has an empty description`);
   }
 });
 
-test('frontmatter: SKILL.md 的 description 不超过 Claude Code 的 1536 字符上限', () => {
-  for (const dir of readdirSync(join(ROOT, 'skills'))) {
+test('frontmatter: the SKILL.md description stays within the Claude Code limit of 1536 characters', () => {
+  for (const dir of skillDirs()) {
     const fm = frontmatter(join('skills', dir, 'SKILL.md'));
     const len = `${fm.description}${fm.when_to_use ?? ''}`.length;
-    assert.ok(len <= 1536, `${dir}: description 共 ${len} 字符，超出部分会在 skill 列表里被截掉`);
+    assert.ok(len <= 1536, `${dir}: description has ${len} characters; the excess is cut off in the skill list`);
   }
 });
 
-test('frontmatter: SKILL.md 的 name 与目录名一致', () => {
-  for (const dir of readdirSync(join(ROOT, 'skills'))) {
+test('frontmatter: the SKILL.md description stays within the Agent Skills spec limit of 1024 characters', () => {
+  // Over the limit, strict hosts (such as zcode) drop the whole skill with no visible error (see issue #23).
+  for (const dir of skillDirs()) {
+    const len = [...frontmatter(join('skills', dir, 'SKILL.md')).description].length;
+    assert.ok(len <= 1024, `${dir}: description has ${len} characters; the spec limit is 1024`);
+  }
+});
+
+test('frontmatter: the SKILL.md name matches its directory name', () => {
+  for (const dir of skillDirs()) {
     assert.equal(frontmatter(join('skills', dir, 'SKILL.md')).name, dir);
   }
 });

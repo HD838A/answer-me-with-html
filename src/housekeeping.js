@@ -1,23 +1,34 @@
-// 数据目录维护：用量统计、am clean、清理提示；渲染后汇总清理与更新两类提示。
-// 提示只打印给 Agent 看（以 "! " 开头的一行），由 Agent 询问用户要不要处理；CLI 从不自动删除。
-import { readdirSync, lstatSync, rmSync, existsSync } from 'node:fs';
-import { join } from 'node:path';
+// Data-directory maintenance: usage stats, am clean, cleanup notice; after a render, collects the cleanup and update notices.
+// Notices are printed only for the Agent (one line starting with "! "), which asks the user whether to act; the CLI never deletes automatically.
+import { readdirSync, lstatSync, rmSync, readFileSync } from 'node:fs';
+import { join, basename, resolve, relative, isAbsolute, sep } from 'node:path';
 import { DAY, readState, writeState } from './state.js';
 import { updateEnabled, updateHint, shouldCheckUpdate, spawnUpdateCheck } from './update.js';
 
 export const CLEAN = Object.freeze({
-  days: 30,                 // am clean 默认删除 30 天前的页面和视频
-  bigBytes: 200 * 2 ** 20,  // 超过 200 MB 立即提示
-  staleDays: 30,            // 距上次清理超过 30 天……
-  staleBytes: 20 * 2 ** 20, // ……且超过 20 MB 时提示
-  hintEveryDays: 7,         // 同一提示最多每 7 天出现一次
+  days: 30,                 // am clean deletes pages, videos and drafts older than 30 days by default
+  bigBytes: 200 * 2 ** 20,  // notify at once above 200 MB
+  staleDays: 30,            // more than 30 days since the last cleanup…
+  staleBytes: 20 * 2 ** 20, // …and above 20 MB: notify
+  hintEveryDays: 7,         // the same notice at most once every 7 days
 });
 const DIRS = ['pages', 'videos', 'cache'];
+const HOUR = DAY / 24;   // a serve-state .tmp file this old was left by a write that stopped
+// The name am render gives a page: <slug>-<stamp>.html, with -2, -3 … when a second page lands in the same second.
+// A custom pages_dir may hold other files the user cares about, so cleanup there touches only names this tool wrote.
+const PAGE_FILE = /^[a-z0-9-]+-\d{8}-\d{6}(-\d+)?\.html$/;
 
-// 列出目录下的普通文件。软链接、读不了的条目直接跳过，统计不因个别文件出错而失败。
+// List regular files in a directory. Symlinks and unreadable entries are skipped, so stats never fail on a single file.
 function walk(dir) {
-  if (!existsSync(dir)) return [];
-  return readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+  let entries;
+  try {
+    // The root entry may also be a symlink; lstat does not follow links, so cleanup never touches external files in the target directory.
+    if (!lstatSync(dir).isDirectory()) return [];
+    entries = readdirSync(dir, { withFileTypes: true });
+  } catch {
+    return [];
+  }
+  return entries.flatMap((e) => {
     const p = join(dir, e.name);
     if (e.isDirectory()) return walk(p);
     try {
@@ -31,31 +42,72 @@ function walk(dir) {
 
 const sum = (files) => files.reduce((n, f) => n + f.bytes, 0);
 
-export function usage(home) {
+// True when path is inside dir: not dir itself, not above it, not a sibling that only shares a prefix. A child named "..notes" is inside.
+const insideDir = (dir, path) => {
+  const rel = relative(resolve(dir), resolve(path));
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${sep}`) && !isAbsolute(rel);
+};
+// pages_dir may overlap the data folders. Each file belongs to one of them: a walk of a data folder leaves out a pages_dir nested in it,
+// and a walk of the pages folder leaves out the data folders nested in it (pages_dir set to the data directory itself).
+const DATA_DIRS = ['videos', 'drafts', 'cache', 'serve-state', 'themes'];
+// relative() is '' for the same folder, also for spellings that differ only in case on Windows, where resolve() keeps the case.
+const samePath = (a, b) => relative(resolve(a), resolve(b)) === '';
+const outsidePages = (root, pages) => (insideDir(root, pages) || samePath(root, pages) ? (f) => !insideDir(pages, f.path) : () => true);
+const pageFiles = (home, pages) => {
+  const nested = DATA_DIRS.map((d) => join(home, d)).filter((root) => insideDir(pages, root));
+  return walk(pages).filter((f) => !nested.some((root) => insideDir(root, f.path)));
+};
+
+export function usage(home, pages = join(home, 'pages')) {
+  const roots = { pages, videos: join(home, 'videos'), cache: join(home, 'cache') };
   const parts = Object.fromEntries(DIRS.map((d) => {
-    const files = walk(join(home, d));
+    const files = d === 'pages' ? pageFiles(home, pages) : walk(roots[d]).filter(outsidePages(roots[d], pages));
     return [d, { count: files.length, bytes: sum(files) }];
   }));
   return { ...parts, total: DIRS.reduce((n, d) => n + parts[d].bytes, 0) };
 }
 
-// 删除 days 天前的页面与视频，以及全部配音缓存（可重新生成）。all：全部删除（配置保留）。
-export function clean(home, { days = CLEAN.days, all = false, dryRun = false, now = Date.now() } = {}) {
+// Files in the pages folder that cleanup may delete: only names am render writes when pages is a custom folder.
+const pageVictims = (home, pages, cutoff, all, custom) =>
+  pageFiles(home, pages).filter((f) => (all || f.mtime < cutoff) && (!custom || PAGE_FILE.test(basename(f.path))));
+
+// Delete pages, videos and kept drafts (src/cli.js keepDraft) older than days, plus the whole voice cache (it can be regenerated). all: delete everything (config is kept).
+// temp: the private folder in the system temporary folder (src/home.js); its pages, videos and drafts follow the same rules.
+// The reply state of a served page (src/serve.js, serve-state/) goes with its page: a state whose page is gone cannot be restored.
+export function clean(home, { days = CLEAN.days, all = false, dryRun = false, now = Date.now(), temp, pages = join(home, 'pages') } = {}) {
   const cutoff = now - days * DAY;
+  const custom = resolve(pages) !== resolve(join(home, 'pages'));
+  // A pages_dir nested in a data folder is cleaned only as pages (with the page-name filter), and each file is counted once.
   const victims = [
-    ...['pages', 'videos'].flatMap((d) => walk(join(home, d)).filter((f) => all || f.mtime < cutoff)),
-    ...walk(join(home, 'cache')),
+    ...pageVictims(home, pages, cutoff, all, custom),
+    ...['videos', 'drafts'].flatMap((d) => walk(join(home, d)).filter((f) => outsidePages(join(home, d), pages)(f) && (all || f.mtime < cutoff))),
+    ...[temp].filter(Boolean).flatMap((dir) => ['pages', 'videos', 'drafts'].flatMap((d) => walk(join(dir, d)).filter((f) => all || f.mtime < cutoff))),
+    ...walk(join(home, 'cache')).filter(outsidePages(join(home, 'cache'), pages)),
   ];
+  // A state goes with its page even when the state itself was saved recently: it names a page file, so the page victims decide too.
+  const gone = new Set(pageVictims(home, pages, cutoff, all, custom).map((f) => f.path));
+  const states = walk(join(home, 'serve-state')).filter(outsidePages(join(home, 'serve-state'), pages)).filter((f) => {
+    // A record being written is a .tmp file (src/serve.js writeState); deleting it before its rename fails the save. One that is an
+    // hour old was left by a process that stopped mid-write, and nothing will rename it.
+    if (!f.path.endsWith('.json')) return f.mtime < now - HOUR;
+    if (all || f.mtime < cutoff) return true;
+    try {
+      const file = JSON.parse(readFileSync(f.path, 'utf8'))?.file;
+      return typeof file !== 'string' || gone.has(join(pages, file)) || !lstatSync(join(pages, file)).isFile();
+    } catch {
+      return true;
+    }
+  });
   if (!dryRun) {
-    for (const f of victims) rmSync(f.path, { force: true });
+    for (const f of [...victims, ...states]) rmSync(f.path, { force: true });
     writeState(home, { lastClean: now, lastCleanHint: null });
   }
-  return { files: victims.length, bytes: sum(victims) };
+  return { files: victims.length + states.length, bytes: sum(victims) + sum(states) };
 }
 
 export const mb = (bytes) => (bytes < 2 ** 20 ? `${Math.ceil(bytes / 1024)} KB` : `${(bytes / 2 ** 20).toFixed(bytes < 10 * 2 ** 20 ? 1 : 0)} MB`);
 
-// 需要提示清理时返回提示文本，否则返回 null。
+// Return the notice text when a cleanup notice is due, otherwise null.
 export function cleanHint(state, use, now = Date.now()) {
   if (state.lastCleanHint && now - state.lastCleanHint < CLEAN.hintEveryDays * DAY) return null;
   const since = state.lastClean ?? state.firstSeen ?? now;
@@ -63,17 +115,18 @@ export function cleanHint(state, use, now = Date.now()) {
   const big = use.total >= CLEAN.bigBytes;
   const stale = days >= CLEAN.staleDays && use.total >= CLEAN.staleBytes;
   if (!big && !stale) return null;
-  const parts = `页面 ${use.pages.count} 个 ${mb(use.pages.bytes)}，视频 ${mb(use.videos.bytes)}，配音缓存 ${mb(use.cache.bytes)}`;
-  const when = state.lastClean ? `上次清理在 ${days} 天前` : '还没有清理过';
-  return `! 清理提示：数据目录已占用 ${mb(use.total)}（${parts}），${when}。请问用户是否运行 am clean（删除 ${CLEAN.days} 天前的页面和视频，并清空配音缓存；全部清掉用 am clean --all）。`;
+  const pages = `${use.pages.count} page${use.pages.count === 1 ? '' : 's'}`;
+  const parts = `${pages} ${mb(use.pages.bytes)}, videos ${mb(use.videos.bytes)}, voice-over cache ${mb(use.cache.bytes)}`;
+  const when = state.lastClean ? `last cleaned ${days} days ago` : 'never cleaned';
+  return `! Cleanup hint: the data directory uses ${mb(use.total)} (${parts}), ${when}. Ask the user whether to run am clean (deletes pages, videos and drafts older than ${CLEAN.days} days and empties the voice-over cache; am clean --all deletes everything).`;
 }
 
-// 每次渲染后调用：记录首次使用时间，返回要打印的提示，并按需安排后台版本检查。
-export function afterRender({ home, env, config, current, scriptPath, background, now = Date.now() }) {
+// Called after every render: record the first-use time, return the notices to print, and schedule the background version check when needed.
+export function afterRender({ home, env, config, current, scriptPath, background, now = Date.now(), pages = join(home, 'pages') }) {
   let state = readState(home);
   if (!state.firstSeen) state = writeState(home, { firstSeen: now });
   const hints = [];
-  const c = cleanHint(state, usage(home), now);
+  const c = cleanHint(state, usage(home, pages), now);
   if (c) {
     hints.push(c);
     state = writeState(home, { lastCleanHint: now });

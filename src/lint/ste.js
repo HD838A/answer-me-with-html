@@ -1,11 +1,17 @@
-// STE 受控写作检查（只约束稿件里的说明文字）。
-// 规则：句长、段长、非推荐词、英文被动语态、中文虚动词 / "的"字连用 / 套话。全部为警告，严格度由 style 决定。
-// 含假名的日文只查句长与段长：日文的"的"是后缀（基本的、具体的），不是中文的结构助词。
-// 跳过：代码与行内代码、~~删除线~~（反例展示）、含 no 状态的表格行、标题、除 callout 外的组件。
+// STE controlled-writing check (only constrains the explanatory text in drafts).
+// The goal is text with no filler; ASD-STE100 is the idea behind it, not a standard to copy.
+// Rules: sentence length, paragraph length, non-approved words (English and Chinese), English passive voice in steps, Chinese light verbs / `的` chains / clichés and filler. All are warnings; strictness comes from style.
+// Japanese with kana gets only the sentence and paragraph length checks: Japanese `的` is a suffix (`基本的`, `具体的`), not the Chinese structural particle.
+// A language other than Chinese, English and Japanese gets only the language-neutral rules: sentence length (in words, or in characters for CJK text) and paragraph length.
+// Image captions (the alt text) are checked like any other text.
+// Skipped: code and inline code, quotations, math ($…$ and $$ blocks), ~~strikethrough~~ (counter-examples), table rows with a no status, headings, components other than callout.
+// A quotation is someone else's words: a draft that quotes a reviewer, a log line or a spec does not have to rewrite it.
 
 import { EN_WORDS } from './wordlist.en.js';
-import { ZH_LIGHT_VERBS, ZH_CLICHES } from './wordlist.zh.js';
-import { isCJK, isJapanese } from '../svg/text.js';
+import { ZH_LIGHT_VERBS, ZH_CLICHES, ZH_WORDS } from './wordlist.zh.js';
+import { isCJK, isJapanese, countWords } from '../svg/text.js';
+import { COMPONENTS } from '../components/index.js';
+import { stripMath, opensDisplay, closesDisplay, isDisplayLine } from '../math.js';
 
 const LIMITS = { zh: { procedural: 35, descriptive: 45 }, en: { procedural: 20, descriptive: 25 } };
 const MAX_SENTENCES = 6;
@@ -27,39 +33,66 @@ export function sentenceLength(sentence) {
   return cjk >= 4 || cjk > words ? { lang: 'zh', count: cjk + words } : { lang: 'en', count: words };
 }
 
+// Sentence length in a language without rules of its own: characters for CJK text (as sentenceLength does), words for everything else.
+// The words come from countWords() in src/svg/text.js, which the video duration estimate uses too.
+const CJK_TEXT = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}]/gu;
+function neutralLength(sentence) {
+  const han = sentence.match(CJK_TEXT)?.length ?? 0;
+  const rest = sentence.replace(CJK_TEXT, ' ');
+  const words = countWords(rest);
+  return han >= 4 || han > words ? { lang: 'zh', count: han + words } : { lang: 'en', count: words };
+}
+
+// The rule family of a draft. Chinese, English and Japanese drafts follow their text, as they always did ('auto'); a declared language
+// selects its own family; any other language, declared or detected, gets the neutral rules. No language given (a direct call) is 'auto'.
+const RULE_LANGUAGES = new Set(['zh', 'en', 'ja']);
+function ruleFamily(language) {
+  if (!language) return 'auto';
+  const base = language.tag.split('-')[0];
+  if (!RULE_LANGUAGES.has(base)) return 'neutral';
+  return language.declared ? base : 'auto';
+}
+
 export function formatWarning(w) {
   return `L${w.line} [${w.rule}] ${w.message}${w.suggestion ? ` → ${w.suggestion}` : ''}`;
 }
 
-export function lintDoc(doc) {
+// language: the resolved language of the draft (optional); it selects the rule family.
+export function lintDoc(doc, language) {
   const warnings = [];
+  const family = ruleFamily(language);
   const blocks = [...doc.intro, ...doc.panels.flatMap((p) => p.blocks)];
   for (const b of blocks) {
-    if (b.type === 'md') lintMarkdown(b.text, b.line, warnings);
-    else if (b.lang === 'callout') lintMarkdown(b.text, b.line + 1, warnings);
+    if (b.type === 'md') lintMarkdown(b.text, b.line, warnings, family);
+    else if (b.lang === 'callout') lintMarkdown(b.text, b.line + 1, warnings, family);
+    else if (COMPONENTS.get(b.lang)?.lint) lintMarkdown(COMPONENTS.get(b.lang).lint(b.text), b.line + 1, warnings, family);
   }
   return warnings;
 }
 
+// A quoted span is evidence, not the draft's own prose: drop it before the rules run. Single quotes stay, because they are usually apostrophes.
+// A span never runs past a second opening mark, so an unbalanced opening quote does not swallow the prose before a later pair.
+const QUOTED = /"[^"\n]*"|“[^“”\n]*”|「[^「」\n]*」|『[^『』\n]*』|«[^«»\n]*»|„[^„“\n]*“/g;
+
 function clean(text) {
-  return text
-    .replace(/~~[^~]*~~/g, '')
-    .replace(/`[^`]*`/g, '')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+  // Inline code goes first, so a quote mark inside code never pairs with one in the prose.
+  return stripMath(text.replace(/~~[^~]*~~/g, '').replace(/`[^`]*`/g, '').replace(QUOTED, ''))
+    .replace(/!\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/\[([^\]]*)\]\([^)]*\)/g, '$1')
     .replace(/<[^>]+>/g, '')
     .replace(/[*_]{1,3}/g, '');
 }
 
-function lintMarkdown(text, startLine, out) {
+function lintMarkdown(text, startLine, out, family) {
   let para = null;
   const flush = () => {
     if (para && para.count > MAX_SENTENCES) {
-      out.push({ line: para.line, rule: 'paragraph-length', message: `段落 ${para.count} 句（上限 ${MAX_SENTENCES}）` });
+      out.push({ line: para.line, rule: 'paragraph-length', message: `paragraph has ${para.count} sentences (max ${MAX_SENTENCES})` });
     }
     para = null;
   };
   let inHtml = false;
+  let inMath = false;
   text.split('\n').forEach((raw, i) => {
     const line = startLine + i;
     const t = raw.trim();
@@ -68,56 +101,70 @@ function lintMarkdown(text, startLine, out) {
       if (/<\/(div|svg|table|details|figure)>\s*$/i.test(t)) inHtml = false;
       return flush();
     }
+    // The TeX of a $$ block is not text: it gives no words and no sentences.
+    if (inMath) {
+      if (!t || closesDisplay(t)) inMath = false;
+      return flush();
+    }
+    if (opensDisplay(raw) || isDisplayLine(raw)) {
+      inMath = opensDisplay(raw);
+      return flush();
+    }
     if (!t || /^#{1,6}\s/.test(t) || /^[-*_]{3,}$/.test(t)) return flush();
     if (t.startsWith('|')) {
       flush();
       if (/^\|?[\s:|-]+\|?$/.test(t)) return;
       const cells = t.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
       if (cells.some((c) => /^(no|✗|✘)(\s|$)/.test(c))) return;
-      cells.forEach((c) => checkUnit(clean(c.replace(/^(ok|warn|✓|✔|⚠)(\s|$)/, '')), line, 'descriptive', out));
+      cells.forEach((c) => checkUnit(clean(c.replace(/^(ok|warn|✓|✔|⚠)(\s|$)/, '')), line, 'descriptive', out, family));
       return;
     }
     const list = t.match(/^(?:([-*+])|(\d+)[.)])\s+(.*)$/);
     if (list) {
       flush();
-      checkUnit(clean(list[3]), line, list[2] ? 'procedural' : 'descriptive', out);
+      checkUnit(clean(list[3]), line, list[2] ? 'procedural' : 'descriptive', out, family);
       return;
     }
     const body = clean(t.replace(/^>\s*/, ''));
-    const n = checkUnit(body, line, 'descriptive', out);
+    const n = checkUnit(body, line, 'descriptive', out, family);
     if (!para) para = { line, count: 0 };
     para.count += n;
   });
   flush();
 }
 
-// 检查一段文字（列表项 / 单元格 / 段落中的一行），返回句子数。
-function checkUnit(text, line, kind, out) {
+// Check one piece of text (a list item / cell / one paragraph line); returns the sentence count.
+function checkUnit(text, line, kind, out, family) {
   const sentences = splitSentences(text);
-  const ja = isJapanese(text);
+  const zhFamily = family === 'auto' || family === 'zh';
+  const ja = family === 'ja' || (zhFamily && isJapanese(text));
+  const chineseRules = zhFamily && !ja;
+  const englishRules = family !== 'neutral';
   for (const s of sentences) {
-    const { lang, count } = sentenceLength(s);
+    const { lang, count } = family === 'neutral' ? neutralLength(s) : sentenceLength(s);
     const limit = LIMITS[lang][kind];
     if (count > limit) {
-      const unit = lang === 'zh' ? '字' : 'words';
+      const unit = lang === 'zh' ? 'characters' : 'words';
       const preview = s.length > 24 ? `${s.slice(0, 24)}…` : s;
-      out.push({ line, rule: 'sentence-length', message: `${kind === 'procedural' ? '步骤' : '句子'} ${count} ${unit}（上限 ${limit}）："${preview}"` });
+      out.push({ line, rule: 'sentence-length', message: `${kind === 'procedural' ? 'step' : 'sentence'} has ${count} ${unit} (max ${limit}): "${preview}"` });
     }
-    if (lang === 'en' && PASSIVE.test(s)) {
-      out.push({ line, rule: 'passive', message: `疑似被动语态："${s.match(PASSIVE)[0]}"`, suggestion: '改为主动语态' });
+    // ASD-STE100 allows the passive in descriptions, so only steps are checked.
+    if (englishRules && kind === 'procedural' && lang === 'en' && PASSIVE.test(s)) {
+      out.push({ line, rule: 'passive', message: `possible passive voice: "${s.match(PASSIVE)[0]}"`, suggestion: 'use active voice' });
     }
   }
   const lexical = [
-    ...EN_RE.flatMap(({ re, suggestion }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `不推荐 "${m[0]}"`, suggestion }))),
-    ...(ja ? [] : ZH_LIGHT_VERBS).flatMap(({ re, label }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `虚动词 "${m[0]}"（${label}）`, suggestion: `直接用「${m[1]}」` }))),
+    ...(englishRules ? EN_RE : []).flatMap(({ re, suggestion }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `not recommended: "${m[0]}"`, suggestion }))),
+    ...(chineseRules ? ZH_LIGHT_VERBS : []).flatMap(({ re, label }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `light verb "${m[0]}" (${label})`, suggestion: `use "${m[1]}"` }))),
+    ...(chineseRules ? ZH_WORDS : []).flatMap(({ re, suggestion }) => [...text.matchAll(re)].map((m) => ({ index: m.index, rule: 'word', message: `not recommended: "${m[0]}"`, suggestion }))),
   ];
   out.push(...lexical.sort((a, b) => a.index - b.index).map(({ index, ...w }) => ({ line, ...w })));
   for (const s of sentences) {
-    if (isJapanese(s)) continue;
-    if ((s.match(/的/g) ?? []).length >= 3) out.push({ line, rule: 'de-chain', message: `"的"字连用：${s}`, suggestion: '拆句或删去多余的"的"' });
+    if (!zhFamily || isJapanese(s)) continue;
+    if ((s.match(/的/g) ?? []).length >= 3) out.push({ line, rule: 'de-chain', message: `chained "的": ${s}`, suggestion: 'split the sentence or remove extra "的"' });
   }
-  for (const c of ja ? [] : ZH_CLICHES) {
-    if (text.includes(c)) out.push({ line, rule: 'cliche', message: `套话 "${c}"`, suggestion: '删除，或换成具体事实' });
+  for (const c of chineseRules ? ZH_CLICHES : []) {
+    if (text.includes(c)) out.push({ line, rule: 'cliche', message: `cliché "${c}"`, suggestion: 'delete it or state a concrete fact' });
   }
   return sentences.length;
 }

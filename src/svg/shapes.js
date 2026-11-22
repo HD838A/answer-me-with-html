@@ -1,11 +1,12 @@
-// SVG 片段生成的共用工具：数值格式化、平滑折线、箭头 marker、多行文字。
+// Shared helpers for SVG fragments: number formatting, smooth polylines, arrow markers, multi-line text.
 import { esc } from './text.js';
+import { svgLine } from '../bidi.js';
 
 export const f = (n) => String(Math.round(n * 10) / 10);
 
 const mid = (a, b) => ({ x: (a.x + b.x) / 2, y: (a.y + b.y) / 2 });
 
-// 经过各折点中点的二次曲线：首尾为直线段，拐角处平滑。
+// Quadratic curves through the midpoints of each bend: straight segments at both ends, smooth corners.
 export function smoothPath(points) {
   const [first, ...rest] = points;
   if (rest.length === 1) return `M${f(first.x)},${f(first.y)} L${f(rest[0].x)},${f(rest[0].y)}`;
@@ -21,20 +22,133 @@ export function smoothPath(points) {
   return parts.join(' ');
 }
 
-export function arrowDefs(uid) {
-  return `<defs><marker id="${uid}-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow" d="M0,0 L10,5 L0,10 z"/></marker></defs>`;
+// variants: extra arrowheads, "added" and "removed" for change markers; each one is a marker named <uid>-arrow-<variant>.
+export function arrowDefs(uid, variants = []) {
+  const marker = (name, cls) => `<marker id="${uid}-arrow${name}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path class="am-arrow${cls}" d="M0,0 L10,5 L0,10 z"/></marker>`;
+  return `<defs>${[marker('', ''), ...variants.map((v) => marker(`-${v}`, ` am-arrow--${v}`))].join('')}</defs>`;
 }
 
-// 以 (cx, cy) 为中心垂直居中排多行文字。
-export function textLines(lines, cx, cy, lineHeight, attrs = '') {
+// Lay out multi-line text vertically centred on (cx, cy). dir: the page direction; on a right-to-left page a line with no
+// right-to-left letter is isolated as left to right (src/bidi.js), so a wrapped `src/` or `lint:` keeps its punctuation in place.
+export function textLines(lines, cx, cy, lineHeight, attrs = '', dir = 'ltr') {
   const top = cy - ((lines.length - 1) * lineHeight) / 2;
   return lines
-    .map((line, i) => `<text x="${f(cx)}" y="${f(top + i * lineHeight)}" text-anchor="middle" dominant-baseline="central"${attrs}>${esc(line)}</text>`)
+    .map((line, i) => `<text x="${f(cx)}" y="${f(top + i * lineHeight)}" text-anchor="middle" dominant-baseline="central"${attrs}>${esc(svgLine(line, dir))}</text>`)
     .join('');
 }
 
-export function svgOpen(width, height, label) {
+// "Flowchart: A, B": the page language's name for the diagram, then the node names. Without a context (component unit tests) it falls back to English.
+const EN_LABELS = { flow: 'Flowchart', state: 'State machine diagram', sequence: 'Sequence diagram', er: 'Entity relationship diagram', class: 'Class diagram', colon: ': ', sep: ', ' };
+
+export function diagramLabel(ui, kind, names) {
+  const u = { ...EN_LABELS, ...ui };
+  return `${u[kind]}${u.colon}${names.join(u.sep)}`;
+}
+
+// dir: the page direction. A right-to-left drawing says so on the root, so its text reads right to left wherever the svg is shown
+// (a copy in the diagram viewer, a page embedded in another document); a left-to-right drawing keeps the tag it always had.
+export function svgOpen(width, height, label, dir = 'ltr') {
   const w = Math.ceil(width);
   const h = Math.ceil(height);
-  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc(label)}" xmlns="http://www.w3.org/2000/svg">`;
+  const direction = dir === 'rtl' ? ' direction="rtl"' : '';
+  return `<svg viewBox="0 0 ${w} ${h}" width="${w}" height="${h}" role="img" aria-label="${esc(label)}"${direction} xmlns="http://www.w3.org/2000/svg">`;
+}
+
+// The page box of each generated diagram / chart svg, scaled by the reader's text size; the viewBox keeps the drawing's own units,
+// so Node's measured text layout stays exact. Only the svgOpen shape is rewritten (width and height equal the viewBox), never
+// another svg. Raw ```svg / ```html blocks bypass the component step, and a video never scales.
+const SVG_OPEN_BOX = /<svg viewBox="0 0 (\d+) (\d+)" width="\1" height="\2"/g;
+
+export function scaleSvgBoxes(html, scale = 1) {
+  if (scale === 1) return html;
+  return String(html).replace(SVG_OPEN_BOX, (tag, w, h) => `<svg viewBox="0 0 ${w} ${h}" width="${Math.ceil(w * scale)}" height="${Math.ceil(h * scale)}"`);
+}
+
+// A right-to-left page reads a drawing from the right: mirror(width) maps an x of the left-to-right layout to its mirror image
+// (the first node or participant on the right, arrows pointing left). Text is not mirrored, only placed.
+export const mirror = (width, rtl) => (rtl ? (x) => width - x : (x) => x);
+
+// dagre's customOrder for flow, er and class. dagre sorts each rank by the average position of its neighbours alone, so two edges
+// that leave one node tie and keep the order of the draft, wherever they end. After dagre's order, swap neighbours in a rank for
+// as long as a swap removes crossings. Only nodes with the same parent swap, and group borders stay, so a group keeps its members.
+// One swap is not always enough: a node at the end of a long edge moves only together with the points of that edge in the ranks
+// before it. So also make each swap that removes nothing or adds crossings, settle again, and keep the result when it has fewer
+// crossings in total. That search stops after SEARCH_LIMIT comparisons, so a diagram with hundreds of edge points still renders
+// at once; a diagram of the usual size needs a few hundred.
+const SEARCH_LIMIT = 40000;
+
+export function orderRanks(g, order) {
+  order(g);
+  const ranks = {};
+  for (const v of g.nodes()) {
+    const { rank, order: at } = g.node(v);
+    if (rank !== undefined) (ranks[rank] ??= [])[at] = v;
+  }
+  const rows = Object.values(ranks);
+  const pairs = (as, bs) => as.reduce((n, a) => n + bs.filter((b) => g.node(b).order < g.node(a).order).length, 0);
+  const crossings = (left, right) => pairs(g.predecessors(left), g.predecessors(right)) + pairs(g.successors(left), g.successors(right));
+  const border = (v) => g.node(v).dummy === 'border';
+  const fixed = (a, b) => g.parent(a) !== g.parent(b) || border(a) || border(b);
+  let compared = 0;
+  // The crossings that go away when the neighbours a, b (a first) change places; negative when the swap adds crossings.
+  const gain = (a, b) => {
+    compared++;
+    return crossings(a, b) - crossings(b, a);
+  };
+  const swap = (row, i) => {
+    [row[i - 1], row[i]] = [row[i], row[i - 1]];
+    g.node(row[i - 1]).order = i - 1;
+    g.node(row[i]).order = i;
+  };
+  const settle = () => {
+    let removed = 0;
+    for (let swapped = true; swapped; ) {
+      swapped = false;
+      for (const row of rows) {
+        for (let i = 1; i < row.length; i++) {
+          const won = fixed(row[i - 1], row[i]) ? 0 : gain(row[i - 1], row[i]);
+          if (won <= 0) continue;
+          swap(row, i);
+          removed += won;
+          swapped = true;
+        }
+      }
+    }
+    return removed;
+  };
+  settle();
+  for (let better = true; better; ) {
+    better = false;
+    for (const row of rows) {
+      for (let i = 1; i < row.length; i++) {
+        if (compared > SEARCH_LIMIT) return;
+        if (fixed(row[i - 1], row[i])) continue;
+        const before = rows.map((r) => [...r]);
+        const cost = -gain(row[i - 1], row[i]);
+        swap(row, i);
+        if (settle() > cost) {
+          better = true;
+          continue;
+        }
+        rows.forEach((r, k) => before[k].forEach((v, at) => {
+          r[at] = v;
+          g.node(v).order = at;
+        }));
+      }
+    }
+  }
+}
+
+// Mirror a finished dagre layout left to right, in place: node and group centres, edge points and edge label positions.
+export function mirrorLayout(g) {
+  const flip = mirror(g.graph().width, true);
+  for (const v of g.nodes()) {
+    const node = g.node(v);
+    node.x = flip(node.x);
+  }
+  for (const e of g.edges()) {
+    const edge = g.edge(e);
+    edge.points = edge.points.map((p) => ({ ...p, x: flip(p.x) }));
+    if (edge.x !== undefined) edge.x = flip(edge.x);
+  }
 }
